@@ -1,11 +1,13 @@
-"""Analizador de flujo para Proyecto 2 (solo simulacion).
+"""Analizador de flujo para Proyecto 2.
 
-Este modulo consulta operaciones publicas de Kalshi con solicitudes GET.
-No carga credenciales y no contiene funciones para crear o cancelar ordenes.
+Este archivo funciona solamente en simulacion.
+Consulta datos publicos usando solicitudes GET.
+No contiene funciones para enviar o cancelar ordenes.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from datetime import datetime
@@ -13,93 +15,233 @@ from datetime import datetime
 import requests
 
 
-BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
-FLOW_WINDOWS = (60, 90, 120)
+BASE_URL = (
+    "https://external-api.kalshi.com"
+    "/trade-api/v2"
+)
 
-# Reglas iniciales para probar; se ajustaran despues de 100 simulaciones.
-MIN_TRADES = int(os.getenv("PAPER_MIN_TRADES", "8"))
-MIN_CONTRACTS = float(os.getenv("PAPER_MIN_CONTRACTS", "20"))
-MIN_DOMINANCE = float(os.getenv("PAPER_MIN_DOMINANCE", "0.65"))
+FLOW_WINDOWS = (
+    60,
+    90,
+    120,
+)
+
+# Estas reglas se revisaran despues
+# de completar 100 operaciones simuladas.
+MIN_TRADES = int(
+    os.getenv(
+        "PAPER_MIN_TRADES",
+        "8",
+    )
+)
+
+MIN_CONTRACTS = float(
+    os.getenv(
+        "PAPER_MIN_CONTRACTS",
+        "20",
+    )
+)
+
+MIN_DOMINANCE = float(
+    os.getenv(
+        "PAPER_MIN_DOMINANCE",
+        "0.65",
+    )
+)
 
 MAX_TRADE_COST = 2.00
 TARGET_PROFIT = 0.20
 STOP_LOSS = 0.10
 
+# Tarifa general para una orden
+# que toma liquidez inmediatamente.
+TAKER_FEE_RATE = 0.07
 
-def _number(value, default=0.0):
+
+def _number(
+    value,
+    default=0.0,
+):
     try:
         return float(value)
-    except (TypeError, ValueError):
+
+    except (
+        TypeError,
+        ValueError,
+    ):
         return default
 
 
-def _unix_time(value):
+def taker_fee(
+    contracts,
+    price,
+):
+    """Calcula la tarifa y redondea hacia arriba."""
+
+    raw_fee = (
+        TAKER_FEE_RATE
+        * contracts
+        * price
+        * (1 - price)
+    )
+
+    return (
+        math.ceil(
+            (
+                raw_fee
+                - 1e-12
+            )
+            * 100
+        )
+        / 100
+    )
+
+
+def net_pnl(
+    contracts,
+    entry_price,
+    exit_price,
+    entry_fee,
+):
+    """Calcula ganancia o perdida despues de tarifas."""
+
+    exit_fee = taker_fee(
+        contracts,
+        exit_price,
+    )
+
+    pnl = (
+        contracts
+        * (
+            exit_price
+            - entry_price
+        )
+        - entry_fee
+        - exit_fee
+    )
+
+    return (
+        round(
+            pnl,
+            4,
+        ),
+        exit_fee,
+    )
+
+
+def _unix_time(
+    value,
+):
     if not value:
         return 0.0
 
     try:
         return datetime.fromisoformat(
-            value.replace("Z", "+00:00")
+            value.replace(
+                "Z",
+                "+00:00",
+            )
         ).timestamp()
-    except (TypeError, ValueError):
+
+    except (
+        TypeError,
+        ValueError,
+    ):
         return 0.0
 
 
 def get_recent_trades(
     ticker,
-    lookback_seconds=max(FLOW_WINDOWS),
+    lookback_seconds=max(
+        FLOW_WINDOWS
+    ),
 ):
-    """Obtiene transacciones publicas y excluye block trades."""
+    """Obtiene operaciones publicas y excluye block trades."""
 
     response = requests.get(
-        BASE_URL + "/markets/trades",
+        BASE_URL
+        + "/markets/trades",
         params={
             "ticker": ticker,
             "min_ts": int(
-                time.time() - lookback_seconds
+                time.time()
+                - lookback_seconds
             ),
             "limit": 1000,
-            "is_block_trade": "false",
+            "is_block_trade": (
+                "false"
+            ),
         },
         timeout=10,
     )
 
     response.raise_for_status()
-    return response.json().get("trades", [])
+
+    return response.json().get(
+        "trades",
+        [],
+    )
 
 
-def _trade_values(trade):
+def _trade_values(
+    trade,
+):
     side = (
-        trade.get("taker_side")
-        or trade.get("taker_outcome_side")
+        trade.get(
+            "taker_side"
+        )
+        or trade.get(
+            "taker_outcome_side"
+        )
         or ""
     ).lower()
 
-    if side not in {"yes", "no"}:
+    if side not in {
+        "yes",
+        "no",
+    }:
         return None
 
     contracts = _number(
-        trade.get("count_fp")
+        trade.get(
+            "count_fp"
+        )
     )
 
     if side == "yes":
-        price_key = "yes_price_dollars"
+        price_key = (
+            "yes_price_dollars"
+        )
     else:
-        price_key = "no_price_dollars"
+        price_key = (
+            "no_price_dollars"
+        )
 
     price = _number(
-        trade.get(price_key)
+        trade.get(
+            price_key
+        )
     )
 
-    if contracts <= 0 or not 0 < price < 1:
+    if (
+        contracts <= 0
+        or not 0 < price < 1
+    ):
         return None
 
     return {
         "side": side,
         "contracts": contracts,
-        "dollars": contracts * price,
-        "timestamp": _unix_time(
-            trade.get("created_time")
+        "dollars": (
+            contracts
+            * price
+        ),
+        "timestamp": (
+            _unix_time(
+                trade.get(
+                    "created_time"
+                )
+            )
         ),
     }
 
@@ -115,8 +257,10 @@ def analyze_flow(
         now = time.time()
 
     if trades is None:
-        raw_trades = get_recent_trades(
-            ticker
+        raw_trades = (
+            get_recent_trades(
+                ticker
+            )
         )
     else:
         raw_trades = trades
@@ -124,12 +268,17 @@ def analyze_flow(
     parsed = []
 
     for trade in raw_trades:
-        item = _trade_values(trade)
+        item = _trade_values(
+            trade
+        )
 
         if item:
-            parsed.append(item)
+            parsed.append(
+                item
+            )
 
     windows = {}
+
     votes = {
         "yes": 0,
         "no": 0,
@@ -139,7 +288,12 @@ def analyze_flow(
         recent = [
             item
             for item in parsed
-            if 0 <= now - item["timestamp"] <= seconds
+            if (
+                0
+                <= now
+                - item["timestamp"]
+                <= seconds
+            )
         ]
 
         yes_contracts = sum(
@@ -159,10 +313,18 @@ def analyze_flow(
             + no_contracts
         )
 
-        if yes_contracts > no_contracts:
+        if (
+            yes_contracts
+            > no_contracts
+        ):
             side = "yes"
-        elif no_contracts > yes_contracts:
+
+        elif (
+            no_contracts
+            > yes_contracts
+        ):
             side = "no"
+
         else:
             side = None
 
@@ -179,16 +341,21 @@ def analyze_flow(
 
         confirmed = (
             side is not None
-            and len(recent) >= MIN_TRADES
-            and total_contracts >= MIN_CONTRACTS
-            and dominance >= MIN_DOMINANCE
+            and len(recent)
+            >= MIN_TRADES
+            and total_contracts
+            >= MIN_CONTRACTS
+            and dominance
+            >= MIN_DOMINANCE
         )
 
         if confirmed:
             votes[side] += 1
 
         windows[str(seconds)] = {
-            "trades": len(recent),
+            "trades": len(
+                recent
+            ),
             "yes_contracts": round(
                 yes_contracts,
                 2,
@@ -209,7 +376,9 @@ def analyze_flow(
                 3,
             ),
             "side": side,
-            "confirmed": confirmed,
+            "confirmed": (
+                confirmed
+            ),
         }
 
     winner = max(
@@ -217,7 +386,9 @@ def analyze_flow(
         key=votes.get,
     )
 
-    confirmed_windows = votes[winner]
+    confirmed_windows = (
+        votes[winner]
+    )
 
     if confirmed_windows < 2:
         return {
@@ -252,12 +423,19 @@ def build_paper_plan(
     yes_bid,
     yes_ask,
 ):
-    """Calcula una entrada ficticia; nunca envia una orden."""
+    """Crea un plan ficticio; nunca envia una orden."""
 
-    if signal.get("action") == "WAIT":
+    if (
+        signal.get("action")
+        == "WAIT"
+    ):
         return {
             "action": "WAIT",
-            "reason": signal.get("reason"),
+            "reason": (
+                signal.get(
+                    "reason"
+                )
+            ),
         }
 
     yes_bid = _number(
@@ -279,75 +457,128 @@ def build_paper_plan(
     if not valid_prices:
         return {
             "action": "WAIT",
-            "reason": "Precio bid/ask invalido",
+            "reason": (
+                "Precio bid/ask invalido"
+            ),
         }
 
     side = signal["side"]
 
     if side == "yes":
         entry_price = yes_ask
-    else:
-        entry_price = 1 - yes_bid
+        current_exit_price = yes_bid
 
-    contracts = int(
+    else:
+        entry_price = (
+            1 - yes_bid
+        )
+
+        current_exit_price = (
+            1 - yes_ask
+        )
+
+    if current_exit_price <= 0.01:
+        return {
+            "action": "WAIT",
+            "reason": (
+                "No hay espacio "
+                "para colocar el stop"
+            ),
+        }
+
+    max_contracts = int(
         MAX_TRADE_COST
         / entry_price
     )
+
+    contracts = 0
+    entry_fee = 0.0
+
+    # Busca la mayor cantidad que:
+    # 1. No supere $2 incluyendo tarifa.
+    # 2. Permita respetar el stop.
+    # 3. Incluya el spread actual.
+    for candidate in range(
+        max_contracts,
+        0,
+        -1,
+    ):
+        candidate_fee = (
+            taker_fee(
+                candidate,
+                entry_price,
+            )
+        )
+
+        total_entry = (
+            candidate
+            * entry_price
+            + candidate_fee
+        )
+
+        adverse_test_price = max(
+            0.01,
+            current_exit_price
+            - 0.01,
+        )
+
+        adverse_pnl, unused_fee = (
+            net_pnl(
+                candidate,
+                entry_price,
+                adverse_test_price,
+                candidate_fee,
+            )
+        )
+
+        if (
+            total_entry
+            <= MAX_TRADE_COST
+            and adverse_pnl
+            >= -STOP_LOSS
+        ):
+            contracts = candidate
+            entry_fee = candidate_fee
+            break
 
     if contracts < 1:
         return {
             "action": "WAIT",
             "reason": (
-                "La entrada supera "
-                "el limite de $2"
+                "Tarifa y spread no "
+                "permiten respetar "
+                "el stop de $0.10"
             ),
         }
 
-    cost = round(
-        contracts * entry_price,
+    position_cost = round(
+        contracts
+        * entry_price,
         2,
     )
 
-    target_price = (
-        entry_price
-        + TARGET_PROFIT / contracts
+    total_entry_cost = round(
+        position_cost
+        + entry_fee,
+        2,
     )
 
-    stop_price = max(
-        0.01,
-        entry_price
-        - STOP_LOSS / contracts,
+    # Busca un objetivo que deje
+    # al menos $0.20 netos.
+    target_price = None
+    target_pnl = None
+    target_exit_fee = None
+
+    first_target_cent = (
+        int(
+            math.floor(
+                entry_price
+                * 100
+            )
+        )
+        + 1
     )
 
-    if target_price > 0.99:
-        return {
-            "action": "WAIT",
-            "reason": (
-                "El objetivo no cabe "
-                "antes de $1.00"
-            ),
-        }
-
-    return {
-        "action": signal["action"],
-        "ticker": signal["ticker"],
-        "side": side,
-        "contracts": contracts,
-        "entry_price": round(
-            entry_price,
-            4,
-        ),
-        "cost": cost,
-        "target_price": round(
-            target_price,
-            4,
-        ),
-        "stop_price": round(
-            stop_price,
-            4,
-        ),
-        "target_profit": TARGET_PROFIT,
-        "stop_loss": STOP_LOSS,
-        "fees_included": False,
-        "real_order": False,
-    }
+    for cents in range(
+        first_target_cent,
+       
