@@ -616,7 +616,8 @@ function downloadPaperCsv(){
       w90.yes_contracts,w90.no_contracts,w120.trades,w120.dominance,
       w120.yes_contracts,w120.no_contracts];
   });
-  const csv=[headers,...rows].map(row=>row.map(csvCell).join(',')).join('\r\n');
+  const csv=[headers,...rows].map(row=>row.map(csvCell).join(','))
+    .join(String.fromCharCode(13,10));
   const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
   const link=document.createElement('a');
   link.href=URL.createObjectURL(blob);
