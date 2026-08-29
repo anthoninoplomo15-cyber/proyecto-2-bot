@@ -19,17 +19,24 @@ BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
 API_KEY_ID = os.getenv("KALSHI_API_KEY_ID", "").strip()
 PRIVATE_KEY_PEM = os.getenv("KALSHI_PRIVATE_KEY", "").replace("\\n", "\n").strip()
 
-# Proyecto 2 siempre comienza en simulacion.
-# No contiene llamadas para colocar ordenes.
+# Proyecto 2 siempre comienza en simulacion. Este archivo no crea, cancela,
+# deposita ni retira dinero, y no contiene ninguna llamada para colocar ordenes.
 SETTINGS = {
     "mode": "PAPER",
     "live_trading": False,
+    "test_version": 3,
     "test_bankroll": 10.00,
     "max_cost_per_trade": 2.00,
     "profit_target": 0.20,
     "stop_loss": 0.10,
-    "max_open_trades": 3,
-    "flow_window_seconds": 90,
+    "max_open_trades": 1,
+    "checkpoint_trades": 20,
+    "final_test_goal": 100,
+    "required_confirmed_windows": 3,
+    "minimum_window_dominance": 0.75,
+    "minimum_window_contracts": 50,
+    "entry_window_seconds": [180, 360],
+    "flow_windows_seconds": [60, 90, 120],
 }
 
 SERIES = [
@@ -39,6 +46,7 @@ SERIES = [
     "KXHYPE15M", "KXSUI15M",
 ]
 
+# Reduce las consultas publicas: el flujo se vuelve a medir cada 45 segundos.
 FLOW_CACHE_SECONDS = 45
 FLOW_CACHE = {"updated": 0.0, "markets": {}}
 
@@ -46,342 +54,157 @@ FLOW_CACHE = {"updated": 0.0, "markets": {}}
 def load_private_key():
     if not PRIVATE_KEY_PEM:
         raise ValueError("Falta KALSHI_PRIVATE_KEY")
-
     return serialization.load_pem_private_key(
-        PRIVATE_KEY_PEM.encode("utf-8"),
-        password=None,
+        PRIVATE_KEY_PEM.encode("utf-8"), password=None
     )
 
 
 def auth_headers(method, endpoint):
-    timestamp = str(
-        int(
-            dt.datetime.now(
-                dt.timezone.utc
-            ).timestamp() * 1000
-        )
-    )
-
-    full_path = urlparse(
-        BASE_URL + endpoint
-    ).path
-
-    message = (
-        f"{timestamp}"
-        f"{method.upper()}"
-        f"{full_path}"
-    ).encode("utf-8")
-
+    timestamp = str(int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000))
+    full_path = urlparse(BASE_URL + endpoint).path
+    message = f"{timestamp}{method.upper()}{full_path}".encode("utf-8")
     signature = load_private_key().sign(
         message,
         padding.PSS(
-            mgf=padding.MGF1(
-                hashes.SHA256()
-            ),
+            mgf=padding.MGF1(hashes.SHA256()),
             salt_length=padding.PSS.DIGEST_LENGTH,
         ),
         hashes.SHA256(),
     )
-
     return {
         "KALSHI-ACCESS-KEY": API_KEY_ID,
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
-        "KALSHI-ACCESS-SIGNATURE": (
-            base64.b64encode(
-                signature
-            ).decode("utf-8")
-        ),
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("utf-8"),
     }
 
 
 def get_balance_status():
     if not API_KEY_ID or not PRIVATE_KEY_PEM:
-        return {
-            "connected": False,
-            "message": "Credenciales pendientes en Render",
-        }
-
+        return {"connected": False, "message": "Credenciales pendientes en Render"}
     try:
         endpoint = "/portfolio/balance"
-
         response = requests.get(
             BASE_URL + endpoint,
-            headers=auth_headers(
-                "GET",
-                endpoint,
-            ),
+            headers=auth_headers("GET", endpoint),
             timeout=12,
         )
-
         response.raise_for_status()
-
         return {
             "connected": True,
             "message": "API conectada en modo lectura/prueba",
         }
-
     except Exception as exc:
         return {
             "connected": False,
-            "message": (
-                "No se pudo verificar la API: "
-                f"{type(exc).__name__}"
-            ),
+            "message": f"No se pudo verificar la API: {type(exc).__name__}",
         }
 
 
-def dollars(
-    market,
-    dollar_key,
-    cents_key,
-):
-    value = market.get(
-        dollar_key
-    )
-
+def dollars(market, dollar_key, cents_key):
+    value = market.get(dollar_key)
     if value not in (None, ""):
         try:
-            return round(
-                float(value),
-                4,
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
+            return round(float(value), 4)
+        except (TypeError, ValueError):
             pass
-
-    value = market.get(
-        cents_key
-    )
-
+    value = market.get(cents_key)
     if value not in (None, ""):
         try:
-            return round(
-                float(value) / 100,
-                4,
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
+            return round(float(value) / 100, 4)
+        except (TypeError, ValueError):
             pass
-
     return None
 
 
-def scan_one_series(
-    series_ticker,
-):
+def scan_one_series(series_ticker):
     response = requests.get(
         BASE_URL + "/markets",
-        params={
-            "series_ticker": series_ticker,
-            "status": "open",
-            "limit": 5,
-        },
+        params={"series_ticker": series_ticker, "status": "open", "limit": 5},
         timeout=8,
     )
-
     response.raise_for_status()
-
     markets = [
         {
             "series": series_ticker,
-            "ticker": market.get(
-                "ticker"
-            ),
-            "title": (
-                market.get("title")
-                or market.get("subtitle")
-                or series_ticker
-            ),
-            "close_time": market.get(
-                "close_time"
-            ),
-            "yes_bid": dollars(
-                market,
-                "yes_bid_dollars",
-                "yes_bid",
-            ),
-            "yes_ask": dollars(
-                market,
-                "yes_ask_dollars",
-                "yes_ask",
-            ),
-            "volume": market.get(
-                "volume_fp",
-                market.get(
-                    "volume",
-                    0,
-                ),
-            ),
+            "ticker": market.get("ticker"),
+            "title": market.get("title") or market.get("subtitle") or series_ticker,
+            "close_time": market.get("close_time"),
+            "yes_bid": dollars(market, "yes_bid_dollars", "yes_bid"),
+            "yes_ask": dollars(market, "yes_ask_dollars", "yes_ask"),
+            "volume": market.get("volume_fp", market.get("volume", 0)),
         }
-        for market
-        in response.json().get(
-            "markets",
-            [],
-        )
+        for market in response.json().get("markets", [])
     ]
-
-    markets.sort(
-        key=lambda item: (
-            item.get("close_time")
-            or ""
-        )
-    )
-
+    markets.sort(key=lambda item: item.get("close_time") or "")
     return markets[:1]
 
 
 def scan_markets():
     found = []
-
-    with ThreadPoolExecutor(
-        max_workers=7
-    ) as pool:
-        jobs = {
-            pool.submit(
-                scan_one_series,
-                ticker,
-            ): ticker
-            for ticker in SERIES
-        }
-
-        for job in as_completed(
-            jobs
-        ):
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        jobs = {pool.submit(scan_one_series, ticker): ticker for ticker in SERIES}
+        for job in as_completed(jobs):
             try:
-                found.extend(
-                    job.result()
-                )
-
+                found.extend(job.result())
             except requests.RequestException:
                 continue
-
-    found.sort(
-        key=lambda item: (
-            item.get("close_time")
-            or ""
-        )
-    )
-
+    found.sort(key=lambda item: item.get("close_time") or "")
     return found
 
 
-def analyze_one_market(
-    market,
-):
-    ticker = market.get(
-        "ticker"
-    )
-
+def analyze_one_market(market):
+    ticker = market.get("ticker")
     try:
-        signal = analyze_flow(
-            ticker
-        )
-
+        signal = analyze_flow(ticker)
         plan = build_paper_plan(
             signal,
             market.get("yes_bid"),
             market.get("yes_ask"),
         )
-
     except requests.RequestException:
         signal = {
             "ticker": ticker,
             "action": "WAIT",
             "side": None,
-            "reason": (
-                "Datos de flujo temporalmente "
-                "no disponibles"
-            ),
+            "reason": "Datos de flujo temporalmente no disponibles",
             "windows": {},
         }
-
-        plan = {
-            "action": "WAIT",
-            "reason": signal["reason"],
-        }
-
-    return ticker, {
-        "signal": signal,
-        "plan": plan,
-    }
+        plan = {"action": "WAIT", "reason": signal["reason"]}
+    return ticker, {"signal": signal, "plan": plan}
 
 
-def add_paper_analysis(
-    markets,
-):
+def add_paper_analysis(markets):
     now = time.monotonic()
-
     cache_is_fresh = (
         FLOW_CACHE["markets"]
-        and now
-        - FLOW_CACHE["updated"]
-        < FLOW_CACHE_SECONDS
+        and now - FLOW_CACHE["updated"] < FLOW_CACHE_SECONDS
     )
 
     if not cache_is_fresh:
         analysis = {}
-
         unique = {
             market.get("ticker"): market
             for market in markets
             if market.get("ticker")
         }
-
-        with ThreadPoolExecutor(
-            max_workers=7
-        ) as pool:
+        with ThreadPoolExecutor(max_workers=7) as pool:
             jobs = [
-                pool.submit(
-                    analyze_one_market,
-                    market,
-                )
-                for market
-                in unique.values()
+                pool.submit(analyze_one_market, market)
+                for market in unique.values()
             ]
-
-            for job in as_completed(
-                jobs
-            ):
+            for job in as_completed(jobs):
                 try:
-                    ticker, result = (
-                        job.result()
-                    )
-
-                    analysis[ticker] = (
-                        result
-                    )
-
+                    ticker, result = job.result()
+                    analysis[ticker] = result
                 except Exception:
                     continue
-
-        FLOW_CACHE["markets"] = (
-            analysis
-        )
-
-        FLOW_CACHE["updated"] = (
-            now
-        )
+        FLOW_CACHE["markets"] = analysis
+        FLOW_CACHE["updated"] = now
 
     enriched = []
-
     for market in markets:
-        item = dict(
-            market
-        )
-
-        result = FLOW_CACHE[
-            "markets"
-        ].get(
-            item.get("ticker"),
-            {},
-        )
-
+        item = dict(market)
+        result = FLOW_CACHE["markets"].get(item.get("ticker"), {})
         item["paper_signal"] = result.get(
             "signal",
             {
@@ -391,19 +214,11 @@ def add_paper_analysis(
                 "windows": {},
             },
         )
-
         item["paper_plan"] = result.get(
             "plan",
-            {
-                "action": "WAIT",
-                "reason": "Analizando flujo",
-            },
+            {"action": "WAIT", "reason": "Analizando flujo"},
         )
-
-        enriched.append(
-            item
-        )
-
+        enriched.append(item)
     return enriched
 
 
@@ -413,98 +228,57 @@ def health():
         "ok": True,
         "project": "Proyecto 2",
         "mode": "PAPER",
+        "version": 3,
     }
 
 
 @app.get("/api/status")
 def api_status():
     markets = scan_markets()
-
     return jsonify(
         {
             "settings": SETTINGS,
             "kalshi": get_balance_status(),
-            "markets": add_paper_analysis(
-                markets
-            ),
-            "updated_at": (
-                dt.datetime.now(
-                    dt.timezone.utc
-                ).isoformat()
-            ),
+            "markets": add_paper_analysis(markets),
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
     )
 
 
 @app.get("/api/market/<ticker>")
 def market_status(ticker):
-    safe_ticker = ticker.replace(
-        "-",
-        "",
-    )
-
+    safe_ticker = ticker.replace("-", "")
     if not safe_ticker.isalnum():
-        return jsonify(
-            {
-                "error": "Ticker invalido"
-            }
-        ), 400
+        return jsonify({"error": "Ticker invalido"}), 400
 
     try:
         response = requests.get(
-            BASE_URL
-            + "/markets/"
-            + ticker,
+            BASE_URL + "/markets/" + ticker,
             timeout=8,
         )
-
         response.raise_for_status()
-
-        market = response.json().get(
-            "market",
-            {},
-        )
-
+        market = response.json().get("market", {})
         return jsonify(
             {
-                "ticker": market.get(
-                    "ticker"
-                ),
-                "status": market.get(
-                    "status"
-                ),
-                "result": market.get(
-                    "result"
-                ),
-                "close_time": market.get(
-                    "close_time"
-                ),
+                "ticker": market.get("ticker"),
+                "status": market.get("status"),
+                "result": market.get("result"),
+                "close_time": market.get("close_time"),
                 "yes_bid": dollars(
-                    market,
-                    "yes_bid_dollars",
-                    "yes_bid",
+                    market, "yes_bid_dollars", "yes_bid"
                 ),
                 "yes_ask": dollars(
-                    market,
-                    "yes_ask_dollars",
-                    "yes_ask",
+                    market, "yes_ask_dollars", "yes_ask"
                 ),
             }
         )
-
     except requests.RequestException:
-        return jsonify(
-            {
-                "error": "Mercado no disponible"
-            }
-        ), 503
+        return jsonify({"error": "Mercado no disponible"}), 503
 
 
 @app.get("/")
 def home():
-    return render_template_string(
-        HTML
-    )
+    return render_template_string(HTML)
 
 
 HTML = """
@@ -512,1414 +286,438 @@ HTML = """
 <html lang="es">
 <head>
   <meta charset="utf-8">
-  <meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
-  >
-  <title>Proyecto 2</title>
-
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Proyecto 2 · Versión 3</title>
   <style>
-    :root {
-      color-scheme: dark;
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    body {
-      margin: 0;
-      background: #07111f;
-      color: #eef4ff;
-      font-family: system-ui, Arial;
-    }
-
-    .wrap {
-      max-width: 1000px;
-      margin: auto;
-      padding: 18px;
-    }
-
-    h1 {
-      margin: 0 0 4px;
-    }
-
-    h2 {
-      margin-top: 24px;
-    }
-
-    .tag {
-      display: inline-block;
-      background: #1f6b3d;
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-weight: 800;
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns:
-        repeat(
-          auto-fit,
-          minmax(140px, 1fr)
-        );
-      gap: 10px;
-      margin: 16px 0;
-    }
-
-    .card {
-      background: #111f33;
-      border: 1px solid #263b57;
-      border-radius: 14px;
-      padding: 14px;
-    }
-
-    .label {
-      color: #96abc8;
-      font-size: 12px;
-    }
-
-    .value {
-      font-size: 21px;
-      font-weight: 800;
-      margin-top: 3px;
-    }
-
-    .safe,
-    .positive {
-      color: #6ee7a2;
-    }
-
-    .warn {
-      color: #ffd166;
-    }
-
-    .negative {
-      color: #ff9fa8;
-    }
-
-    .note {
-      background: #13243a;
-      border-left: 4px solid #4da3ff;
-      padding: 12px;
-      border-radius: 9px;
-      margin: 14px 0;
-      color: #c7d7ed;
-    }
-
-    .controls {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      flex-wrap: wrap;
-      margin: 14px 0;
-    }
-
-    .button {
-      border: 0;
-      border-radius: 10px;
-      padding: 11px 16px;
-      font-weight: 800;
-      cursor: pointer;
-      background: #2f81f7;
-      color: white;
-    }
-
-    .button.pause {
-      background: #a66a12;
-    }
-
-    .pill {
-      display: inline-block;
-      padding: 4px 8px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 800;
-    }
-
-    .yes {
-      background: #165b37;
-      color: #82f0ad;
-    }
-
-    .no {
-      background: #67272d;
-      color: #ff9fa8;
-    }
-
-    .wait {
-      background: #3c4655;
-      color: #d6deea;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      background: #111f33;
-      border-radius: 14px;
-      overflow: hidden;
-    }
-
-    th,
-    td {
-      text-align: left;
-      padding: 11px 9px;
-      border-bottom:
-        1px solid #263b57;
-      font-size: 13px;
-    }
-
-    th {
-      color: #96abc8;
-    }
-
-    .foot {
-      color: #96abc8;
-      margin-top: 14px;
-      font-size: 12px;
-    }
-
-    .table-wrap {
-      overflow-x: auto;
-      border-radius: 14px;
-    }
-
-    .muted {
-      color: #96abc8;
-    }
+    :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#07111f;
+    color:#eef4ff;font-family:system-ui,Arial}.wrap{max-width:1000px;margin:auto;padding:18px}
+    h1{margin:0 0 4px}h2{margin-top:24px}.tag{display:inline-block;background:#1f6b3d;
+    padding:6px 10px;border-radius:999px;font-weight:800}.grid{display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:16px 0}
+    .card{background:#111f33;border:1px solid #263b57;border-radius:14px;padding:14px}
+    .label{color:#96abc8;font-size:12px}.value{font-size:21px;font-weight:800;
+    margin-top:3px}.safe,.positive{color:#6ee7a2}.warn{color:#ffd166}.negative{color:#ff9fa8}
+    .note{background:#13243a;border-left:4px solid #4da3ff;padding:12px;border-radius:9px;
+    margin:14px 0;color:#c7d7ed}.controls{display:flex;gap:10px;align-items:center;
+    flex-wrap:wrap;margin:14px 0}.button{border:0;border-radius:10px;padding:11px 16px;
+    font-weight:800;cursor:pointer;background:#2f81f7;color:white}.button.pause{background:#a66a12}
+    .pill{display:inline-block;padding:4px 8px;border-radius:999px;font-size:12px;
+    font-weight:800}.yes{background:#165b37;color:#82f0ad}.no{background:#67272d;
+    color:#ff9fa8}.wait{background:#3c4655;color:#d6deea}table{width:100%;
+    border-collapse:collapse;background:#111f33;border-radius:14px;overflow:hidden}
+    th,td{text-align:left;padding:11px 9px;border-bottom:1px solid #263b57;
+    font-size:13px}th{color:#96abc8}.foot{color:#96abc8;margin-top:14px;font-size:12px}
+    .table-wrap{overflow-x:auto;border-radius:14px}.muted{color:#96abc8}
+    .button.secondary{background:#31445f}.button:disabled{opacity:.5;cursor:not-allowed}
   </style>
 </head>
-
-<body>
-<div class="wrap">
-  <h1>Proyecto 2</h1>
-
-  <div class="tag">
-    MODO PRUEBA · SIN ÓRDENES REALES
-  </div>
+<body><div class="wrap">
+  <h1>Proyecto 2 · Versión 3</h1>
+  <div class="tag">MODO PRUEBA · SIN ÓRDENES REALES</div>
 
   <div class="grid">
-    <div class="card">
-      <div class="label">
-        Kalshi API
-      </div>
-
-      <div
-        id="api"
-        class="value warn"
-      >
-        Verificando…
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="label">
-        Pruebas terminadas
-      </div>
-
-      <div
-        id="paper-count"
-        class="value"
-      >
-        0 / 100
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="label">
-        Abiertas
-      </div>
-
-      <div
-        id="paper-open"
-        class="value"
-      >
-        0 / 3
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="label">
-        Saldo disponible
-      </div>
-
-      <div
-        id="paper-cash"
-        class="value"
-      >
-        $10.00
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="label">
-        Ganancia neta
-      </div>
-
-      <div
-        id="paper-pnl"
-        class="value"
-      >
-        $0.00
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="label">
-        Máximo por operación
-      </div>
-
-      <div class="value">
-        $2.00
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="label">
-        Objetivo / stop
-      </div>
-
-      <div class="value">
-        +$0.20 / −$0.10
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="label">
-        Ventanas de flujo
-      </div>
-
-      <div class="value">
-        60 / 90 / 120 s
-      </div>
-    </div>
+    <div class="card"><div class="label">Kalshi API</div>
+      <div id="api" class="value warn">Verificando…</div></div>
+    <div class="card"><div class="label">Punto de control</div>
+      <div id="paper-count" class="value">0 / 20</div></div>
+    <div class="card"><div class="label">Abiertas</div>
+      <div id="paper-open" class="value">0 / 1</div></div>
+    <div class="card"><div class="label">Saldo disponible</div>
+      <div id="paper-cash" class="value">$10.00</div></div>
+    <div class="card"><div class="label">Ganancia neta</div>
+      <div id="paper-pnl" class="value">$0.00</div></div>
+    <div class="card"><div class="label">Objetivos / aciertos</div>
+      <div id="paper-wins" class="value">0 / 0 · 0%</div></div>
+    <div class="card"><div class="label">Máximo por operación</div>
+      <div class="value">$2.00</div></div>
+    <div class="card"><div class="label">Objetivo / stop</div>
+      <div class="value">+$0.20 / −$0.10</div></div>
+    <div class="card"><div class="label">Filtro de flujo</div>
+      <div class="value">3/3 · ≥75% · ≥50</div></div>
   </div>
 
-  <div class="note">
-    <strong>
-      Simulación controlada.
-    </strong>
-
-    Las entradas, salidas, spread
-    y tarifas se calculan con dinero
-    ficticio. Para registrar pruebas,
-    deja esta pestaña abierta y la
-    computadora encendida.
-  </div>
+  <div class="note"><strong>Simulación controlada.</strong> Las entradas, salidas,
+  spread y tarifas se calculan con dinero ficticio. Esta versión elige una sola
+  criptomoneda por intervalo de 15 minutos y exige las tres ventanas de flujo.
+  Se pausará automáticamente al llegar a 20 pruebas para revisar el resultado.
+  Para registrar pruebas, deja esta pestaña abierta y la computadora encendida.</div>
 
   <div class="controls">
-    <button
-      id="paper-toggle"
-      class="button"
-      onclick="togglePaper()"
-    >
+    <button id="paper-toggle" class="button" onclick="togglePaper()">
       Iniciar prueba automática
     </button>
-
-    <span
-      id="paper-state"
-      class="muted"
-    >
-      Pausada · no abre posiciones
-    </span>
+    <button id="paper-download" class="button secondary" onclick="downloadPaperCsv()">
+      Descargar resultados CSV
+    </button>
+    <span id="paper-state" class="muted">Pausada · no abre posiciones</span>
   </div>
 
-  <h2>
-    Mercados cripto de 15 minutos
-  </h2>
+  <h2>Mercados cripto de 15 minutos</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Serie</th><th>YES compra</th><th>Flujo</th><th>Plan simulado</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="4">Buscando mercados…</td></tr></tbody>
+  </table></div>
 
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Serie</th>
-          <th>YES compra</th>
-          <th>Flujo</th>
-          <th>Plan simulado</th>
-        </tr>
-      </thead>
+  <h2>Operaciones simuladas abiertas</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Serie</th><th>Lado</th><th>Entrada</th><th>Objetivo</th><th>Stop</th></tr></thead>
+    <tbody id="open-rows"><tr><td colspan="5">Ninguna</td></tr></tbody>
+  </table></div>
 
-      <tbody id="rows">
-        <tr>
-          <td colspan="4">
-            Buscando mercados…
-          </td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+  <h2>Últimos resultados</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Serie</th><th>Lado</th><th>Salida</th><th>Resultado neto</th><th>Dominio</th><th>Motivo</th></tr></thead>
+    <tbody id="closed-rows"><tr><td colspan="6">Todavía no hay resultados</td></tr></tbody>
+  </table></div>
 
-  <h2>
-    Operaciones simuladas abiertas
-  </h2>
-
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Serie</th>
-          <th>Lado</th>
-          <th>Entrada</th>
-          <th>Objetivo</th>
-          <th>Stop</th>
-        </tr>
-      </thead>
-
-      <tbody id="open-rows">
-        <tr>
-          <td colspan="5">
-            Ninguna
-          </td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
-
-  <h2>
-    Últimos resultados
-  </h2>
-
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Serie</th>
-          <th>Lado</th>
-          <th>Salida</th>
-          <th>Resultado neto</th>
-          <th>Motivo</th>
-        </tr>
-      </thead>
-
-      <tbody id="closed-rows">
-        <tr>
-          <td colspan="5">
-            Todavía no hay resultados
-          </td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
-
-  <div
-    id="updated"
-    class="foot"
-  ></div>
+  <div id="updated" class="foot"></div>
 </div>
 
 <script>
-const PAPER_KEY =
-  "proyecto2_paper_v2";
+const PAPER_KEY='proyecto2_paper_v3';
+const START_BANKROLL=10.00;
+const MAX_OPEN=1;
+const CHECKPOINT_GOAL=20;
+const FINAL_TEST_GOAL=100;
+const REQUIRED_WINDOWS=['60','90','120'];
+const MIN_WINDOW_TRADES=8;
+const MIN_WINDOW_CONTRACTS=50;
+const MIN_WINDOW_DOMINANCE=0.75;
+const ENTRY_MIN_SECONDS=180;
+const ENTRY_MAX_SECONDS=360;
+let refreshing=false;
 
-const START_BANKROLL = 10.00;
-const MAX_OPEN = 3;
-const TEST_GOAL = 100;
-
-let refreshing = false;
-
-
-function roundNumber(
-  value,
-  digits = 4,
-) {
-  const power =
-    10 ** digits;
-
-  return Math.round(
-    (
-      Number(value)
-      + Number.EPSILON
-    )
-    * power
-  ) / power;
+function roundNumber(value,digits=4){
+  const power=10**digits;
+  return Math.round((Number(value)+Number.EPSILON)*power)/power;
 }
 
+function money(value){
+  const number=Number(value)||0;
+  if(number>0){return '+$'+number.toFixed(2);}
+  if(number<0){return '-$'+Math.abs(number).toFixed(2);}
+  return '$0.00';
+}
 
-function money(value) {
-  const number =
-    Number(value) || 0;
+function newPaperState(){
+  return {version:3,active:false,cash:START_BANKROLL,open:[],closed:[],seen:[],
+    usedIntervals:[]};
+}
 
-  if (number > 0) {
-    return (
-      "+$"
-      + number.toFixed(2)
-    );
+function loadPaper(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(PAPER_KEY));
+    if(!saved||saved.version!==3||!Array.isArray(saved.open)||
+       !Array.isArray(saved.closed)||!Array.isArray(saved.seen)||
+       !Array.isArray(saved.usedIntervals)){return newPaperState();}
+    return {...newPaperState(),...saved,cash:Number(saved.cash)};
+  }catch(error){return newPaperState();}
+}
+
+let paper=loadPaper();
+
+function savePaper(){
+  localStorage.setItem(PAPER_KEY,JSON.stringify(paper));
+}
+
+function takerFee(contracts,price){
+  const raw=0.07*Number(contracts)*Number(price)*(1-Number(price));
+  return Math.ceil((raw-1e-12)*100)/100;
+}
+
+function exitPrice(market,side){
+  if(side==='yes'){
+    return market.yes_bid==null?null:Number(market.yes_bid);
   }
-
-  if (number < 0) {
-    return (
-      "-$"
-      + Math.abs(
-          number
-        ).toFixed(2)
-    );
-  }
-
-  return "$0.00";
+  return market.yes_ask==null?null:1-Number(market.yes_ask);
 }
 
-
-function newPaperState() {
-  return {
-    version: 2,
-    active: false,
-    cash: START_BANKROLL,
-    open: [],
-    closed: [],
-    seen: [],
-  };
+function exitResult(position,price){
+  const fee=takerFee(position.contracts,price);
+  const proceeds=position.contracts*price-fee;
+  return {fee,pnl:roundNumber(proceeds-position.cost),proceeds:roundNumber(proceeds)};
 }
 
-
-function loadPaper() {
-  try {
-    const saved =
-      JSON.parse(
-        localStorage.getItem(
-          PAPER_KEY
-        )
-      );
-
-    if (
-      !saved
-      || !Array.isArray(
-        saved.open
-      )
-      || !Array.isArray(
-        saved.closed
-      )
-      || !Array.isArray(
-        saved.seen
-      )
-    ) {
-      return newPaperState();
-    }
-
-    return {
-      ...newPaperState(),
-      ...saved,
-      cash: Number(
-        saved.cash
-      ),
-    };
-
-  } catch (error) {
-    return newPaperState();
-  }
+function closeAtPrice(position,price,reason){
+  const result=exitResult(position,price);
+  paper.cash=roundNumber(paper.cash+result.proceeds);
+  paper.closed.push({...position,exitPrice:price,exitFee:result.fee,
+    pnl:result.pnl,reason,closedAt:new Date().toISOString()});
 }
 
-
-let paper = loadPaper();
-
-
-function savePaper() {
-  localStorage.setItem(
-    PAPER_KEY,
-    JSON.stringify(
-      paper
-    )
-  );
+function settlePosition(position,result){
+  const won=position.side===String(result).toLowerCase();
+  const proceeds=won?position.contracts:0;
+  const pnl=roundNumber(proceeds-position.cost);
+  paper.cash=roundNumber(paper.cash+proceeds);
+  paper.closed.push({...position,exitPrice:won?1:0,exitFee:0,pnl,
+    reason:'RESULTADO',closedAt:new Date().toISOString()});
 }
 
-
-function takerFee(
-  contracts,
-  price,
-) {
-  const raw =
-    0.07
-    * Number(contracts)
-    * Number(price)
-    * (
-      1
-      - Number(price)
-    );
-
-  return (
-    Math.ceil(
-      (
-        raw
-        - 1e-12
-      )
-      * 100
-    )
-    / 100
-  );
+async function getMissingMarket(ticker){
+  try{
+    const response=await fetch('/api/market/'+encodeURIComponent(ticker),
+      {cache:'no-store'});
+    return response.ok?await response.json():null;
+  }catch(error){return null;}
 }
 
+async function updateOpenPositions(markets){
+  const current=new Map(markets.map(m=>[m.ticker,m]));
+  const remaining=[];
 
-function exitPrice(
-  market,
-  side,
-) {
-  if (side === "yes") {
-    if (
-      market.yes_bid == null
-    ) {
-      return null;
-    }
+  for(const position of paper.open){
+    let market=current.get(position.ticker)||null;
+    if(!market){market=await getMissingMarket(position.ticker);}
 
-    return Number(
-      market.yes_bid
-    );
-  }
-
-  if (
-    market.yes_ask == null
-  ) {
-    return null;
-  }
-
-  return (
-    1
-    - Number(
-        market.yes_ask
-      )
-  );
-}
-
-
-function exitResult(
-  position,
-  price,
-) {
-  const fee =
-    takerFee(
-      position.contracts,
-      price,
-    );
-
-  const proceeds =
-    position.contracts
-    * price
-    - fee;
-
-  return {
-    fee: fee,
-    pnl: roundNumber(
-      proceeds
-      - position.cost
-    ),
-    proceeds: roundNumber(
-      proceeds
-    ),
-  };
-}
-
-
-function closeAtPrice(
-  position,
-  price,
-  reason,
-) {
-  const result =
-    exitResult(
-      position,
-      price,
-    );
-
-  paper.cash =
-    roundNumber(
-      paper.cash
-      + result.proceeds
-    );
-
-  paper.closed.push(
-    {
-      ...position,
-      exitPrice: price,
-      exitFee: result.fee,
-      pnl: result.pnl,
-      reason: reason,
-      closedAt:
-        new Date().toISOString(),
-    }
-  );
-}
-
-
-function settlePosition(
-  position,
-  result,
-) {
-  const won =
-    position.side
-    === String(
-      result
-    ).toLowerCase();
-
-  const proceeds =
-    won
-      ? position.contracts
-      : 0;
-
-  const pnl =
-    roundNumber(
-      proceeds
-      - position.cost
-    );
-
-  paper.cash =
-    roundNumber(
-      paper.cash
-      + proceeds
-    );
-
-  paper.closed.push(
-    {
-      ...position,
-      exitPrice:
-        won ? 1 : 0,
-      exitFee: 0,
-      pnl: pnl,
-      reason: "RESULTADO",
-      closedAt:
-        new Date().toISOString(),
-    }
-  );
-}
-
-
-async function getMissingMarket(
-  ticker,
-) {
-  try {
-    const response =
-      await fetch(
-        "/api/market/"
-        + encodeURIComponent(
-            ticker
-          ),
-        {
-          cache: "no-store",
-        },
-      );
-
-    if (!response.ok) {
-      return null;
-    }
-
-    return await response.json();
-
-  } catch (error) {
-    return null;
-  }
-}
-
-
-async function updateOpenPositions(
-  markets,
-) {
-  const current =
-    new Map(
-      markets.map(
-        market => [
-          market.ticker,
-          market,
-        ]
-      )
-    );
-
-  const remaining = [];
-
-  for (
-    const position
-    of paper.open
-  ) {
-    let market =
-      current.get(
-        position.ticker
-      ) || null;
-
-    if (!market) {
-      market =
-        await getMissingMarket(
-          position.ticker
-        );
-    }
-
-    const result =
-      String(
-        market?.result
-      ).toLowerCase();
-
-    if (
-      market
-      && [
-        "yes",
-        "no",
-      ].includes(result)
-    ) {
-      settlePosition(
-        position,
-        result,
-      );
-
+    if(market&&['yes','no'].includes(String(market.result).toLowerCase())){
+      settlePosition(position,market.result);
       continue;
     }
 
-    const price =
-      market
-        ? exitPrice(
-            market,
-            position.side,
-          )
-        : null;
-
-    if (
-      price == null
-      || !Number.isFinite(
-        price
-      )
-      || price <= 0
-      || price >= 1
-    ) {
-      remaining.push(
-        position
-      );
-
+    const price=market?exitPrice(market,position.side):null;
+    if(price==null||!Number.isFinite(price)||price<=0||price>=1){
+      remaining.push(position);
       continue;
     }
 
-    const secondsLeft =
-      (
-        Date.parse(
-          position.closeTime
-        )
-        - Date.now()
-      )
-      / 1000;
-
-    if (
-      price
-      >= position.targetPrice
-    ) {
-      closeAtPrice(
-        position,
-        position.targetPrice,
-        "OBJETIVO",
-      );
-
-    } else if (
-      price
-      <= position.stopPrice
-    ) {
-      closeAtPrice(
-        position,
-        position.stopPrice,
-        "STOP",
-      );
-
-    } else if (
-      secondsLeft <= 30
-    ) {
-      closeAtPrice(
-        position,
-        price,
-        "TIEMPO",
-      );
-
-    } else {
-      remaining.push(
-        position
-      );
+    const secondsLeft=(Date.parse(position.closeTime)-Date.now())/1000;
+    if(price>=position.targetPrice){
+      closeAtPrice(position,position.targetPrice,'OBJETIVO');
+    }else if(price<=position.stopPrice){
+      closeAtPrice(position,position.stopPrice,'STOP');
+    }else if(secondsLeft<=30){
+      closeAtPrice(position,price,'TIEMPO');
+    }else{
+      remaining.push(position);
     }
   }
 
-  paper.open =
-    remaining;
+  paper.open=remaining;
 }
 
-
-function flowScore(market) {
-  const windows =
-    Object.values(
-      market.paper_signal
-        ?.windows
-      || {}
-    );
-
-  const confirmed =
-    windows.filter(
-      window =>
-        window.confirmed
-    );
-
-  const dominance =
-    confirmed.reduce(
-      (
-        sum,
-        window,
-      ) =>
-        sum
-        + Number(
-            window.dominance
-            || 0
-          ),
-      0,
-    );
-
-  return (
-    confirmed.length
-    * 100
-    + dominance
-  );
-}
-
-
-function validEntryTime(
-  market,
-) {
-  const close =
-    Date.parse(
-      market.close_time
-    );
-
-  if (
-    !Number.isFinite(
-      close
-    )
-  ) {
-    return false;
+function strictFlow(market){
+  const signal=market.paper_signal||{};
+  const side=String(signal.side||'').toLowerCase();
+  if(!['yes','no'].includes(side)){
+    return {eligible:false,reason:'Sin dirección confirmada'};
   }
 
-  const secondsLeft =
-    (
-      close
-      - Date.now()
-    )
-    / 1000;
-
-  return (
-    secondsLeft > 180
-    && secondsLeft < 780
-  );
-}
-
-
-function openCandidates(
-  markets,
-) {
-  if (
-    !paper.active
-    || paper.closed.length
-       + paper.open.length
-       >= TEST_GOAL
-  ) {
-    return;
+  const windows=REQUIRED_WINDOWS.map(key=>({key,value:signal.windows?.[key]}));
+  if(windows.some(item=>!item.value)){
+    return {eligible:false,reason:'Falta una ventana de flujo'};
   }
 
-  const candidates =
-    markets.filter(
-      market => {
-        const plan =
-          market.paper_plan
-          || {};
-
-        return (
-          plan.action
-          && plan.action !== "WAIT"
-          && !paper.seen.includes(
-            market.ticker
-          )
-          && validEntryTime(
-            market
-          )
-        );
-      }
-    ).sort(
-      (
-        first,
-        second,
-      ) =>
-        flowScore(second)
-        - flowScore(first)
-    );
-
-  for (
-    const market
-    of candidates
-  ) {
-    if (
-      paper.open.length
-      >= MAX_OPEN
-      || paper.closed.length
-         + paper.open.length
-         >= TEST_GOAL
-    ) {
-      break;
+  for(const item of windows){
+    const window=item.value;
+    const total=Number(window.yes_contracts||0)+Number(window.no_contracts||0);
+    if(!window.confirmed||String(window.side||'').toLowerCase()!==side){
+      return {eligible:false,reason:'Las 3 ventanas no coinciden'};
     }
-
-    const plan =
-      market.paper_plan;
-
-    if (
-      Number(plan.cost)
-      > paper.cash
-    ) {
-      continue;
+    if(Number(window.trades||0)<MIN_WINDOW_TRADES){
+      return {eligible:false,reason:'Pocas operaciones en el flujo'};
     }
+    if(total<MIN_WINDOW_CONTRACTS){
+      return {eligible:false,reason:'Menos de 50 contratos por ventana'};
+    }
+    if(Number(window.dominance||0)<MIN_WINDOW_DOMINANCE){
+      return {eligible:false,reason:'Dominio menor de 75%'};
+    }
+  }
 
-    paper.cash =
-      roundNumber(
-        paper.cash
-        - Number(
-            plan.cost
-          )
-      );
+  const dominances=windows.map(item=>Number(item.value.dominance||0));
+  const totals=windows.map(item=>Number(item.value.yes_contracts||0)
+    +Number(item.value.no_contracts||0));
+  const averageDominance=dominances.reduce((sum,value)=>sum+value,0)/dominances.length;
+  const minimumContracts=Math.min(...totals);
+  return {eligible:true,side,averageDominance,minimumContracts,
+    score:averageDominance*1000+Math.min(minimumContracts,999)/1000};
+}
 
-    paper.open.push(
-      {
-        ticker:
-          market.ticker,
-        series:
-          market.series,
-        side:
-          plan.side,
-        contracts:
-          Number(
-            plan.contracts
-          ),
-        entryPrice:
-          Number(
-            plan.entry_price
-          ),
-        entryFee:
-          Number(
-            plan.entry_fee
-          ),
-        cost:
-          Number(
-            plan.cost
-          ),
-        targetPrice:
-          Number(
-            plan.target_price
-          ),
-        stopPrice:
-          Number(
-            plan.stop_price
-          ),
-        closeTime:
-          market.close_time,
-        openedAt:
-          new Date().toISOString(),
-      }
-    );
+function intervalKey(market){
+  const close=Date.parse(market.close_time);
+  return Number.isFinite(close)?String(Math.round(close/900000)):'';
+}
 
-    paper.seen.push(
-      market.ticker
-    );
+function validEntryTime(market){
+  const close=Date.parse(market.close_time);
+  if(!Number.isFinite(close)){return false;}
+  const secondsLeft=(close-Date.now())/1000;
+  return secondsLeft>ENTRY_MIN_SECONDS&&secondsLeft<ENTRY_MAX_SECONDS;
+}
+
+function openCandidates(markets){
+  if(!paper.active||paper.closed.length+paper.open.length>=CHECKPOINT_GOAL){return;}
+
+  const candidates=markets.map(market=>({market,strict:strictFlow(market)}))
+    .filter(item=>{
+      const market=item.market;
+      const plan=market.paper_plan||{};
+      const key=intervalKey(market);
+      return item.strict.eligible&&plan.action&&plan.action!=='WAIT'
+        &&String(plan.side||'').toLowerCase()===item.strict.side
+        &&!paper.seen.includes(market.ticker)&&key
+        &&!paper.usedIntervals.includes(key)&&validEntryTime(market);
+    }).sort((a,b)=>b.strict.score-a.strict.score);
+
+  for(const item of candidates){
+    if(paper.open.length>=MAX_OPEN||
+       paper.closed.length+paper.open.length>=CHECKPOINT_GOAL){break;}
+    const market=item.market;
+    const plan=market.paper_plan;
+    const key=intervalKey(market);
+    if(Number(plan.cost)>paper.cash){continue;}
+
+    paper.cash=roundNumber(paper.cash-Number(plan.cost));
+    paper.open.push({ticker:market.ticker,series:market.series,side:plan.side,
+      contracts:Number(plan.contracts),entryPrice:Number(plan.entry_price),
+      entryFee:Number(plan.entry_fee),cost:Number(plan.cost),
+      targetPrice:Number(plan.target_price),stopPrice:Number(plan.stop_price),
+      closeTime:market.close_time,intervalKey:key,
+      flowScore:roundNumber(item.strict.score,3),
+      averageDominance:roundNumber(item.strict.averageDominance,4),
+      minimumContracts:roundNumber(item.strict.minimumContracts,2),
+      flowWindows:JSON.parse(JSON.stringify(market.paper_signal?.windows||{})),
+      openedAt:new Date().toISOString()});
+    paper.seen.push(market.ticker);
+    paper.usedIntervals.push(key);
+    break;
   }
 }
 
-
-function togglePaper() {
-  if (
-    paper.closed.length
-    >= TEST_GOAL
-  ) {
-    paper.active = false;
-
-  } else {
-    paper.active =
-      !paper.active;
-  }
-
+function togglePaper(){
+  if(paper.closed.length>=CHECKPOINT_GOAL){paper.active=false;}
+  else{paper.active=!paper.active;}
   savePaper();
   renderPaper();
 }
 
-
-function renderPaper() {
-  const realized =
-    paper.closed.reduce(
-      (
-        sum,
-        trade,
-      ) =>
-        sum
-        + Number(
-            trade.pnl
-            || 0
-          ),
-      0,
-    );
-
-  document.getElementById(
-    "paper-count"
-  ).textContent =
-    paper.closed.length
-    + " / "
-    + TEST_GOAL;
-
-  document.getElementById(
-    "paper-open"
-  ).textContent =
-    paper.open.length
-    + " / "
-    + MAX_OPEN;
-
-  document.getElementById(
-    "paper-cash"
-  ).textContent =
-    "$"
-    + paper.cash.toFixed(2);
-
-  const pnl =
-    document.getElementById(
-      "paper-pnl"
-    );
-
-  pnl.textContent =
-    money(
-      realized
-    );
-
-  pnl.className =
-    "value "
-    + (
-      realized > 0
-        ? "positive"
-        : realized < 0
-          ? "negative"
-          : ""
-    );
-
-  const button =
-    document.getElementById(
-      "paper-toggle"
-    );
-
-  button.textContent =
-    paper.active
-      ? "Pausar nuevas entradas"
-      : "Iniciar prueba automática";
-
-  button.className =
-    "button "
-    + (
-      paper.active
-        ? "pause"
-        : ""
-    );
-
-  document.getElementById(
-    "paper-state"
-  ).textContent =
-    paper.closed.length
-    >= TEST_GOAL
-      ? "Prueba de 100 terminada"
-      : paper.active
-        ? "Activa · buscando máximo 3 posiciones"
-        : "Pausada · no abre posiciones";
-
-  const openRows =
-    paper.open.map(
-      position => `
-        <tr>
-          <td>
-            ${
-              position.series
-                .replace("KX", "")
-                .replace("15M", "")
-            }
-          </td>
-
-          <td>
-            ${position.side.toUpperCase()}
-          </td>
-
-          <td>
-            $${position.entryPrice.toFixed(2)}
-          </td>
-
-          <td>
-            $${position.targetPrice.toFixed(2)}
-          </td>
-
-          <td>
-            $${position.stopPrice.toFixed(2)}
-          </td>
-        </tr>
-      `
-    ).join("");
-
-  document.getElementById(
-    "open-rows"
-  ).innerHTML =
-    openRows
-    || `
-      <tr>
-        <td colspan="5">
-          Ninguna
-        </td>
-      </tr>
-    `;
-
-  const closedRows =
-    paper.closed
-      .slice(-10)
-      .reverse()
-      .map(
-        trade => `
-          <tr>
-            <td>
-              ${
-                trade.series
-                  .replace("KX", "")
-                  .replace("15M", "")
-              }
-            </td>
-
-            <td>
-              ${trade.side.toUpperCase()}
-            </td>
-
-            <td>
-              $${Number(
-                trade.exitPrice
-              ).toFixed(2)}
-            </td>
-
-            <td
-              class="${
-                trade.pnl >= 0
-                  ? "positive"
-                  : "negative"
-              }"
-            >
-              ${money(trade.pnl)}
-            </td>
-
-            <td>
-              ${trade.reason}
-            </td>
-          </tr>
-        `
-      ).join("");
-
-  document.getElementById(
-    "closed-rows"
-  ).innerHTML =
-    closedRows
-    || `
-      <tr>
-        <td colspan="5">
-          Todavía no hay resultados
-        </td>
-      </tr>
-    `;
+function csvCell(value){
+  const text=value==null?'':String(value);
+  return '"'+text.replaceAll('"','""')+'"';
 }
 
-
-function renderMarkets(
-  markets,
-) {
-  const rows =
-    markets.map(
-      market => {
-        const action =
-          market.paper_signal
-            ?.action
-          || "WAIT";
-
-        const css =
-          action
-          === "PAPER_BUY_YES"
-            ? "yes"
-            : action
-              === "PAPER_BUY_NO"
-              ? "no"
-              : "wait";
-
-        const label =
-          action
-          === "PAPER_BUY_YES"
-            ? "PRUEBA YES"
-            : action
-              === "PAPER_BUY_NO"
-              ? "PRUEBA NO"
-              : "ESPERAR";
-
-        const plan =
-          market.paper_plan
-          || {};
-
-        const planText =
-          plan.action
-          && plan.action !== "WAIT"
-            ? (
-              plan.contracts
-              + " contratos · $"
-              + Number(
-                  plan.cost
-                ).toFixed(2)
-            )
-            : "—";
-
-        const name =
-          market.series
-            .replace("KX", "")
-            .replace("15M", "");
-
-        const price =
-          market.yes_ask == null
-            ? "—"
-            : (
-              "$"
-              + Number(
-                  market.yes_ask
-                ).toFixed(2)
-            );
-
-        return `
-          <tr>
-            <td>${name}</td>
-            <td>${price}</td>
-
-            <td>
-              <span
-                class="pill ${css}"
-                title="${
-                  market.paper_signal
-                    ?.reason
-                  || "Analizando"
-                }"
-              >
-                ${label}
-              </span>
-            </td>
-
-            <td>${planText}</td>
-          </tr>
-        `;
-      }
-    ).join("");
-
-  document.getElementById(
-    "rows"
-  ).innerHTML =
-    rows
-    || `
-      <tr>
-        <td colspan="4">
-          No hay mercados abiertos ahora
-        </td>
-      </tr>
-    `;
+function downloadPaperCsv(){
+  if(!paper.closed.length){return;}
+  const headers=['opened_at','closed_at','interval_close','series','ticker','side',
+    'contracts','entry_price','exit_price','target_price','stop_price','entry_fee',
+    'exit_fee','cost','pnl','reason','average_dominance','minimum_contracts',
+    'w60_trades','w60_dominance','w60_yes','w60_no','w90_trades','w90_dominance',
+    'w90_yes','w90_no','w120_trades','w120_dominance','w120_yes','w120_no'];
+  const rows=paper.closed.map(trade=>{
+    const w60=trade.flowWindows?.['60']||{};
+    const w90=trade.flowWindows?.['90']||{};
+    const w120=trade.flowWindows?.['120']||{};
+    return [trade.openedAt,trade.closedAt,trade.closeTime,trade.series,trade.ticker,
+      trade.side,trade.contracts,trade.entryPrice,trade.exitPrice,trade.targetPrice,
+      trade.stopPrice,trade.entryFee,trade.exitFee,trade.cost,trade.pnl,trade.reason,
+      trade.averageDominance,trade.minimumContracts,w60.trades,w60.dominance,
+      w60.yes_contracts,w60.no_contracts,w90.trades,w90.dominance,
+      w90.yes_contracts,w90.no_contracts,w120.trades,w120.dominance,
+      w120.yes_contracts,w120.no_contracts];
+  });
+  const csv=[headers,...rows].map(row=>row.map(csvCell).join(',')).join('\r\n');
+  const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
+  const link=document.createElement('a');
+  link.href=URL.createObjectURL(blob);
+  link.download='proyecto2_v3_resultados_'+new Date().toISOString().slice(0,10)+'.csv';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(()=>URL.revokeObjectURL(link.href),1000);
 }
 
+function renderPaper(){
+  const realized=paper.closed.reduce((sum,trade)=>sum+Number(trade.pnl||0),0);
+  const wins=paper.closed.filter(trade=>Number(trade.pnl||0)>0).length;
+  const winRate=paper.closed.length?wins/paper.closed.length*100:0;
+  document.getElementById('paper-count').textContent=paper.closed.length+' / '
+    +CHECKPOINT_GOAL+' · meta '+FINAL_TEST_GOAL;
+  document.getElementById('paper-open').textContent=paper.open.length+' / '+MAX_OPEN;
+  document.getElementById('paper-cash').textContent='$'+paper.cash.toFixed(2);
+  document.getElementById('paper-wins').textContent=wins+' / '+paper.closed.length
+    +' · '+winRate.toFixed(1)+'%';
+  const pnl=document.getElementById('paper-pnl');
+  pnl.textContent=money(realized);
+  pnl.className='value '+(realized>0?'positive':realized<0?'negative':'');
 
-async function refresh() {
-  if (refreshing) {
-    return;
-  }
+  const button=document.getElementById('paper-toggle');
+  button.textContent=paper.active?'Pausar nuevas entradas':'Iniciar prueba automática';
+  button.className='button '+(paper.active?'pause':'');
+  button.disabled=paper.closed.length>=CHECKPOINT_GOAL;
+  document.getElementById('paper-download').disabled=!paper.closed.length;
+  document.getElementById('paper-state').textContent=paper.closed.length>=CHECKPOINT_GOAL
+    ?'Punto de control 20 terminado · revisa antes de continuar'
+    :paper.active?'Activa · una sola entrada por intervalo'
+    :'Pausada · no abre posiciones';
 
-  refreshing = true;
+  document.getElementById('open-rows').innerHTML=paper.open.map(position=>`<tr>
+    <td>${position.series.replace('KX','').replace('15M','')}</td>
+    <td>${position.side.toUpperCase()}</td><td>$${position.entryPrice.toFixed(2)}</td>
+    <td>$${position.targetPrice.toFixed(2)}</td><td>$${position.stopPrice.toFixed(2)}</td>
+    </tr>`).join('')||'<tr><td colspan="5">Ninguna</td></tr>';
 
-  try {
-    const response =
-      await fetch(
-        "/api/status",
-        {
-          cache: "no-store",
-        },
-      );
+  document.getElementById('closed-rows').innerHTML=paper.closed.slice(-10).reverse()
+    .map(trade=>`<tr><td>${trade.series.replace('KX','').replace('15M','')}</td>
+    <td>${trade.side.toUpperCase()}</td><td>$${Number(trade.exitPrice).toFixed(2)}</td>
+    <td class="${trade.pnl>=0?'positive':'negative'}">${money(trade.pnl)}</td>
+    <td>${Number.isFinite(Number(trade.averageDominance))
+      ?(Number(trade.averageDominance)*100).toFixed(1)+'%':'—'}</td>
+    <td>${trade.reason}</td></tr>`).join('')
+    ||'<tr><td colspan="6">Todavía no hay resultados</td></tr>';
+}
 
-    if (!response.ok) {
-      throw new Error(
-        "status"
-      );
-    }
+function renderMarkets(markets){
+  document.getElementById('rows').innerHTML=markets.map(market=>{
+    const strict=strictFlow(market);
+    const css=strict.eligible?(strict.side==='yes'?'yes':'no'):'wait';
+    const label=strict.eligible?'FUERTE '+strict.side.toUpperCase():'ESPERAR';
+    const plan=market.paper_plan||{};
+    const planText=strict.eligible&&plan.action&&plan.action!=='WAIT'
+      ?plan.contracts+' contratos · $'+Number(plan.cost).toFixed(2):'—';
+    const explanation=strict.eligible
+      ?'3/3 ventanas · dominio '+(strict.averageDominance*100).toFixed(1)+'%'
+      :strict.reason;
+    const name=market.series.replace('KX','').replace('15M','');
+    const price=market.yes_ask==null?'—':'$'+Number(market.yes_ask).toFixed(2);
+    return `<tr><td>${name}</td><td>${price}</td><td><span class="pill ${css}"
+      title="${explanation||'Analizando'}">${label}</span></td>
+      <td>${planText}</td></tr>`;
+  }).join('')||'<tr><td colspan="4">No hay mercados abiertos ahora</td></tr>';
+}
 
-    const data =
-      await response.json();
+async function refresh(){
+  if(refreshing){return;}
+  refreshing=true;
+  try{
+    const response=await fetch('/api/status',{cache:'no-store'});
+    if(!response.ok){throw new Error('status');}
+    const data=await response.json();
+    const api=document.getElementById('api');
+    api.textContent=data.kalshi.connected?'Conectada':'Pendiente';
+    api.className='value '+(data.kalshi.connected?'safe':'warn');
 
-    const api =
-      document.getElementById(
-        "api"
-      );
-
-    api.textContent =
-      data.kalshi.connected
-        ? "Conectada"
-        : "Pendiente";
-
-    api.className =
-      "value "
-      + (
-        data.kalshi.connected
-          ? "safe"
-          : "warn"
-      );
-
-    await updateOpenPositions(
-      data.markets
-    );
-
-    openCandidates(
-      data.markets
-    );
-
-    if (
-      paper.closed.length
-      >= TEST_GOAL
-    ) {
-      paper.active = false;
-    }
-
+    await updateOpenPositions(data.markets);
+    openCandidates(data.markets);
+    if(paper.closed.length>=CHECKPOINT_GOAL){paper.active=false;}
     savePaper();
-
-    renderMarkets(
-      data.markets
-    );
-
+    renderMarkets(data.markets);
     renderPaper();
-
-    document.getElementById(
-      "updated"
-    ).textContent =
-      "Actualizado: "
-      + new Date(
-          data.updated_at
-        ).toLocaleString()
-      + " · costos incluyen tarifas";
-
-  } catch (error) {
-    document.getElementById(
-      "api"
-    ).textContent =
-      "Sin conexión";
-
-  } finally {
-    refreshing = false;
-  }
+    document.getElementById('updated').textContent='Actualizado: '
+      +new Date(data.updated_at).toLocaleString()+' · costos incluyen tarifas';
+  }catch(error){
+    document.getElementById('api').textContent='Sin conexión';
+  }finally{refreshing=false;}
 }
-
 
 renderPaper();
 refresh();
-
-setInterval(
-  refresh,
-  5000,
-);
+setInterval(refresh,5000);
 </script>
-</body>
-</html>
+</body></html>
 """
 
 
 if __name__ == "__main__":
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000",
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port,
-    )
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
