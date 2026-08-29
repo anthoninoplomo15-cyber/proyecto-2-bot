@@ -581,4 +581,128 @@ def build_paper_plan(
 
     for cents in range(
         first_target_cent,
-       
+        100,
+    ):
+        price = (
+            cents / 100
+        )
+
+        pnl, exit_fee = net_pnl(
+            contracts,
+            entry_price,
+            price,
+            entry_fee,
+        )
+
+        if pnl >= TARGET_PROFIT:
+            target_price = price
+            target_pnl = pnl
+            target_exit_fee = (
+                exit_fee
+            )
+            break
+
+    if target_price is None:
+        return {
+            "action": "WAIT",
+            "reason": (
+                "El objetivo no cabe "
+                "antes de $1.00"
+            ),
+        }
+
+    # Busca el stop mas bajo
+    # que no exceda $0.10 de perdida.
+    stop_price = (
+        current_exit_price
+    )
+
+    stop_pnl, stop_exit_fee = (
+        net_pnl(
+            contracts,
+            entry_price,
+            current_exit_price,
+            entry_fee,
+        )
+    )
+
+    first_stop_cent = min(
+        99,
+        int(
+            math.floor(
+                current_exit_price
+                * 100
+            )
+        ),
+    )
+
+    for cents in range(
+        first_stop_cent,
+        0,
+        -1,
+    ):
+        price = (
+            cents / 100
+        )
+
+        pnl, exit_fee = net_pnl(
+            contracts,
+            entry_price,
+            price,
+            entry_fee,
+        )
+
+        if pnl < -STOP_LOSS:
+            break
+
+        stop_price = price
+        stop_pnl = pnl
+        stop_exit_fee = exit_fee
+
+    return {
+        "action": (
+            signal["action"]
+        ),
+        "ticker": (
+            signal["ticker"]
+        ),
+        "side": side,
+        "contracts": contracts,
+        "entry_price": round(
+            entry_price,
+            4,
+        ),
+        "position_cost": (
+            position_cost
+        ),
+        "entry_fee": (
+            entry_fee
+        ),
+        "cost": (
+            total_entry_cost
+        ),
+        "target_price": round(
+            target_price,
+            4,
+        ),
+        "stop_price": round(
+            stop_price,
+            4,
+        ),
+        "target_profit": round(
+            target_pnl,
+            4,
+        ),
+        "target_exit_fee": (
+            target_exit_fee
+        ),
+        "stop_loss": round(
+            abs(stop_pnl),
+            4,
+        ),
+        "stop_exit_fee": (
+            stop_exit_fee
+        ),
+        "fees_included": True,
+        "real_order": False,
+    }
