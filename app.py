@@ -909,7 +909,7 @@ HTML = """
 
 <script>
 const PAPER_KEY =
-  "proyecto2_paper_v1";
+  "proyecto2_paper_v2";
 
 const START_BANKROLL = 10.00;
 const MAX_OPEN = 3;
@@ -961,7 +961,7 @@ function money(value) {
 
 function newPaperState() {
   return {
-    version: 1,
+    version: 2,
     active: false,
     cash: START_BANKROLL,
     open: [],
@@ -1296,7 +1296,7 @@ async function updateOpenPositions(
     ) {
       closeAtPrice(
         position,
-        price,
+        position.targetPrice,
         "OBJETIVO",
       );
 
@@ -1306,7 +1306,7 @@ async function updateOpenPositions(
     ) {
       closeAtPrice(
         position,
-        price,
+        position.stopPrice,
         "STOP",
       );
 
@@ -1903,7 +1903,7 @@ refresh();
 
 setInterval(
   refresh,
-  15000,
+  5000,
 );
 </script>
 </body>
