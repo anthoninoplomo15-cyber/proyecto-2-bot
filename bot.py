@@ -1,8 +1,9 @@
-"""Motor matematico PAPER de Proyecto 2, version 8.
+"""Motor matematico PAPER de Proyecto 2, version 9.
 
-La estrategia compra el lado ganador apenas comienza cada intervalo. Arriesga
-como maximo $1, incluyendo la tarifa de entrada, no usa stop loss y activa un
-trailing de 2 centavos cuando el valor de venta neto supera $1.10.
+La estrategia compra el primer lado cuyo flujo ejecutado alcanza $10,000 durante
+los primeros cinco minutos de cada intervalo. Arriesga como maximo $1,
+incluyendo la tarifa de entrada, no usa stop loss y activa un trailing de 2
+centavos cuando el valor de venta neto supera $1.10.
 
 Este modulo no contiene endpoints para crear, cancelar o modificar ordenes.
 """
@@ -16,6 +17,7 @@ TRAIL_ARM_NET_PROCEEDS = 1.10
 TRAIL_DROP = 0.02
 CONTRACT_STEP = 0.01
 PRICE_STEP = 0.01
+FLOW_THRESHOLD = 10_000.00
 
 
 def _number(value):
@@ -122,8 +124,9 @@ def build_entry_plan(
     max_total=MAX_TOTAL_COST,
     arm_net_proceeds=TRAIL_ARM_NET_PROCEEDS,
     trail_drop=TRAIL_DROP,
+    flow_threshold=FLOW_THRESHOLD,
 ):
-    """Crea un plan PAPER para el lado ganador seleccionado por la app."""
+    """Crea un plan PAPER para el primer lado que cruza el flujo requerido."""
     normalized_side = str(side or "").lower()
     price = _number(entry_price)
     if normalized_side not in {"yes", "no"}:
@@ -147,8 +150,9 @@ def build_entry_plan(
         "cost": cost,
         "trail_arm_net_proceeds": round(float(arm_net_proceeds), 4),
         "trail_drop": round(float(trail_drop), 4),
+        "flow_threshold": round(float(flow_threshold), 2),
         "estimated_arm_price": arm_price,
         "stop_loss": None,
         "hold_if_never_armed": True,
-        "reason": "Lado ganador al comenzar el intervalo",
+        "reason": "Primer lado en alcanzar $10,000 de flujo ejecutado",
     }

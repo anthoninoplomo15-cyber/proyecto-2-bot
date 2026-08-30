@@ -1,5 +1,6 @@
 import base64
 import datetime as dt
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,10 +25,12 @@ PRIVATE_KEY_PEM = os.getenv("KALSHI_PRIVATE_KEY", "").replace("\\n", "\n").strip
 SETTINGS = {
     "mode": "PAPER",
     "live_trading": False,
-    "test_version": 8,
+    "test_version": 9,
     "test_bankroll": 14.00,
     "max_total_cost_per_crypto": 1.00,
-    "entry_mode": "higher_ask_at_interval_start",
+    "entry_mode": "first_taker_outcome_flow_to_10000",
+    "flow_threshold_dollars": 10_000.00,
+    "flow_measure": "executed_taker_outcome_notional",
     "trail_arm_net_proceeds": 1.10,
     "trail_drop": 0.02,
     "stop_loss": None,
@@ -39,6 +42,10 @@ SETTINGS = {
     "entry_window_seconds_remaining": [600, 905],
     "poll_seconds": 3,
 }
+
+FLOW_THRESHOLD = 10_000.00
+INTERVAL_SECONDS = 15 * 60
+FLOW_WINDOW_SECONDS = 5 * 60
 
 SERIES = [
     "KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M",
@@ -128,6 +135,159 @@ def opposite_price(price):
     return round(1 - float(price), 4)
 
 
+def parse_trade_time(trade):
+    """Devuelve la hora Unix mas precisa disponible para ordenar ejecuciones."""
+    value = trade.get("ts_ms")
+    if value not in (None, ""):
+        try:
+            return float(value) / 1000
+        except (TypeError, ValueError):
+            pass
+
+    value = trade.get("ts")
+    if value not in (None, ""):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+
+    value = str(trade.get("created_time") or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.timestamp()
+
+
+def interval_times(close_time):
+    value = str(close_time or "").strip()
+    if not value:
+        return None
+    try:
+        close_at = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if close_at.tzinfo is None:
+        close_at = close_at.replace(tzinfo=dt.timezone.utc)
+    close_ts = close_at.timestamp()
+    start_ts = close_ts - INTERVAL_SECONDS
+    return start_ts, start_ts + FLOW_WINDOW_SECONDS
+
+
+def empty_flow(available, window_closed=False):
+    starting_value = 0.0 if available and not window_closed else None
+    return {
+        "flow_available": available,
+        "flow_window_closed": window_closed,
+        "yes_flow": starting_value,
+        "no_flow": starting_value,
+        "flow_first_side": None,
+        "flow_crossed_at": None,
+        "flow_trade_count": 0,
+        "flow_threshold": FLOW_THRESHOLD,
+    }
+
+
+def fetch_trade_flow(ticker, close_time):
+    """Suma el dinero ejecutado por el taker de cada lado en los primeros 5 min."""
+    window = interval_times(close_time)
+    if not ticker or window is None:
+        return empty_flow(False)
+
+    start_ts, deadline_ts = window
+    now_ts = dt.datetime.now(dt.timezone.utc).timestamp()
+    if now_ts < start_ts:
+        return empty_flow(True)
+    if now_ts >= deadline_ts:
+        # La ventana ya cerro. Nunca se abre una entrada nueva despues de 5 min.
+        return empty_flow(True, window_closed=True)
+
+    trades = []
+    cursor = None
+    seen_cursors = set()
+    while True:
+        params = {
+            "ticker": ticker,
+            "min_ts": max(0, int(start_ts) - 1),
+            "max_ts": int(now_ts) + 1,
+            "limit": 1000,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        response = requests.get(
+            BASE_URL + "/markets/trades",
+            params=params,
+            timeout=8,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        trades.extend(payload.get("trades", []))
+        cursor = str(payload.get("cursor") or "")
+        if not cursor:
+            break
+        if cursor in seen_cursors:
+            raise ValueError("Cursor de trades repetido")
+        seen_cursors.add(cursor)
+
+    normalized = []
+    for trade in trades:
+        executed_at = parse_trade_time(trade)
+        if (
+            executed_at is None
+            or executed_at < start_ts
+            or executed_at > now_ts
+            or executed_at >= deadline_ts
+        ):
+            continue
+        side = str(
+            trade.get("taker_outcome_side") or trade.get("taker_side") or ""
+        ).lower()
+        if side not in {"yes", "no"}:
+            continue
+        try:
+            count = float(trade.get("count_fp", trade.get("count")))
+            price = float(trade.get(f"{side}_price_dollars"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not math.isfinite(count)
+            or not math.isfinite(price)
+            or count <= 0
+            or not 0 < price < 1
+        ):
+            continue
+        amount = count * price
+        normalized.append(
+            (executed_at, str(trade.get("trade_id") or ""), side, amount)
+        )
+
+    totals = {"yes": 0.0, "no": 0.0}
+    first_side = None
+    crossed_at = None
+    for executed_at, _trade_id, side, amount in sorted(normalized):
+        totals[side] += amount
+        if first_side is None and totals[side] + 1e-9 >= FLOW_THRESHOLD:
+            first_side = side
+            crossed_at = dt.datetime.fromtimestamp(
+                executed_at, tz=dt.timezone.utc
+            ).isoformat()
+
+    return {
+        "flow_available": True,
+        "flow_window_closed": False,
+        "yes_flow": round(totals["yes"], 2),
+        "no_flow": round(totals["no"], 2),
+        "flow_first_side": first_side,
+        "flow_crossed_at": crossed_at,
+        "flow_trade_count": len(normalized),
+        "flow_threshold": FLOW_THRESHOLD,
+    }
+
+
 def scan_one_series(series_ticker):
     response = requests.get(
         BASE_URL + "/markets",
@@ -148,7 +308,14 @@ def scan_one_series(series_ticker):
         for market in response.json().get("markets", [])
     ]
     markets.sort(key=lambda item: item.get("close_time") or "")
-    return markets[:1]
+    selected = markets[:1]
+    for market in selected:
+        try:
+            market.update(fetch_trade_flow(market.get("ticker"), market.get("close_time")))
+        except (requests.exceptions.RequestException, TypeError, ValueError):
+            # Falla cerrada: sin flujo verificable no existe entrada.
+            market.update(empty_flow(False))
+    return selected
 
 
 def scan_markets():
@@ -158,7 +325,7 @@ def scan_markets():
         for job in as_completed(jobs):
             try:
                 found.extend(job.result())
-            except requests.RequestException:
+            except requests.exceptions.RequestException:
                 continue
     found.sort(key=lambda item: (item.get("close_time") or "", item.get("series") or ""))
     return found
@@ -176,6 +343,12 @@ def add_strategy_plans(markets):
         item["no_ask"] = no_ask
         item["yes_plan"] = build_entry_plan("yes", yes_ask)
         item["no_plan"] = build_entry_plan("no", no_ask)
+        first_side = item.get("flow_first_side")
+        item["selected_plan"] = (
+            item["yes_plan"] if first_side == "yes"
+            else item["no_plan"] if first_side == "no"
+            else None
+        )
         enriched.append(item)
     return enriched
 
@@ -186,7 +359,7 @@ def health():
         "ok": True,
         "project": "Proyecto 2",
         "mode": "PAPER",
-        "version": 8,
+        "version": 9,
         "live_trading": False,
     }
 
@@ -228,7 +401,7 @@ def market_status(ticker):
                 "no_ask": opposite_price(yes_bid),
             }
         )
-    except requests.RequestException:
+    except requests.exceptions.RequestException:
         return jsonify({"error": "Mercado no disponible"}), 503
 
 
@@ -243,7 +416,7 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Proyecto 2 · Versión 8</title>
+  <title>Proyecto 2 · Versión 9</title>
   <style>
     :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#07111f;
     color:#eef4ff;font-family:system-ui,Arial}.wrap{max-width:1080px;margin:auto;padding:18px}
@@ -268,8 +441,8 @@ HTML = """
   </style>
 </head>
 <body><div class="wrap">
-  <h1>Proyecto 2 · Versión 8</h1>
-  <div class="tag">MODO PRUEBA · ESTRATEGIA DEL LADO GANADOR</div>
+  <h1>Proyecto 2 · Versión 9</h1>
+  <div class="tag">MODO PRUEBA · PRIMER LADO EN $10K DE FLUJO</div>
 
   <div class="grid">
     <div class="card"><div class="label">Kalshi API</div>
@@ -289,7 +462,7 @@ HTML = """
     <div class="card"><div class="label">Operaciones positivas</div>
       <div id="paper-wins" class="value">0 / 0 · 0%</div></div>
     <div class="card"><div class="label">Entrada</div>
-      <div class="value">Lado ganador al comenzar</div></div>
+      <div class="value">Primer lado en $10K</div></div>
     <div class="card"><div class="label">Máximo por cripto</div>
       <div class="value">$1 con fee</div></div>
     <div class="card"><div class="label">Activar seguimiento</div>
@@ -303,9 +476,11 @@ HTML = """
   </div>
 
   <div class="note"><strong>Regla automática de esta prueba.</strong> Al comenzar
-  cada contrato de 15 minutos, compara los dos <em>ask</em> ejecutables y compra el
-  lado más caro, que es el lado que va ganando en ese momento. Si están empatados,
-  espera a que uno quede por encima. Usa hasta $1 por criptomoneda, incluyendo la tarifa.
+  cada contrato de 15 minutos, pone en cero el flujo de UP y DOWN. Suma por
+  separado el dinero de las operaciones ejecutadas según el lado del <em>taker</em>
+  y compra el primer lado que alcance $10,000 durante los primeros 5 minutos. Si
+  ninguno alcanza $10,000, no abre una posición en ese intervalo. Usa hasta $1
+  por criptomoneda, incluyendo la tarifa.
   No vende antes de que el valor recibido al <em>bid</em>, después de la tarifa de
   salida, llegue a $1.10. Desde ese momento sigue el valor neto más alto y vende
   cuando retrocede 2¢. Si nunca llega a $1.10, conserva la posición hasta el
@@ -315,7 +490,8 @@ HTML = """
   <div class="note risk"><strong>Riesgo importante.</strong> No tener stop loss
   permite perder casi todo el dólar. El seguimiento de 2¢ no protege la posición
   antes de llegar a $1.10 netos y una caída rápida puede simular una salida por
-  debajo del nivel esperado. Esta prueba mide la idea; no demuestra que sea
+  debajo del nivel esperado. Alcanzar $10,000 de flujo tampoco garantiza el
+  resultado. Esta prueba mide la idea; no demuestra que sea
   rentable ni coloca dinero real. Mantén esta pestaña abierta para que registre.</div>
 
   <div class="controls">
@@ -330,8 +506,8 @@ HTML = """
 
   <h2>Mercados cripto de 15 minutos</h2>
   <div class="table-wrap"><table>
-    <thead><tr><th>Cripto</th><th>UP compra</th><th>DOWN compra</th><th>Tiempo</th><th>Estado</th><th>Plan</th></tr></thead>
-    <tbody id="rows"><tr><td colspan="6">Buscando mercados…</td></tr></tbody>
+    <thead><tr><th>Cripto</th><th>UP compra</th><th>DOWN compra</th><th>Flujo UP</th><th>Flujo DOWN</th><th>Tiempo</th><th>Estado</th><th>Plan</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="8">Buscando mercados…</td></tr></tbody>
   </table></div>
 
   <h2>Operaciones simuladas abiertas</h2>
@@ -350,7 +526,7 @@ HTML = """
 </div>
 
 <script>
-const PAPER_KEY='proyecto2_paper_v8_winner_trailing_all_intervals';
+const PAPER_KEY='proyecto2_paper_v9_flow10k_trailing_all_intervals';
 const START_BANKROLL=14.00;
 const MAX_OPEN=14;
 const TRAIL_ARM_NET_PROCEEDS=1.10;
@@ -375,6 +551,13 @@ function dollarsText(value){
   if(value==null||value===''){return '—';}
   const number=Number(value);
   return Number.isFinite(number)?'$'+number.toFixed(2):'—';
+}
+
+function flowText(value){
+  if(value==null||value===''){return '—';}
+  const number=Number(value);
+  if(!Number.isFinite(number)){return '—';}
+  return '$'+number.toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:2});
 }
 
 function priceText(value){
@@ -408,13 +591,13 @@ function validEntryTime(market){
 }
 
 function newPaperState(){
-  return {version:'8-winner-trailing-all',active:false,cash:START_BANKROLL,open:[],closed:[],seen:[]};
+  return {version:'9-flow10k-trailing-all',active:false,cash:START_BANKROLL,open:[],closed:[],seen:[]};
 }
 
 function loadPaper(){
   try{
     const saved=JSON.parse(localStorage.getItem(PAPER_KEY));
-    if(!saved||saved.version!=='8-winner-trailing-all'||!Array.isArray(saved.open)
+    if(!saved||saved.version!=='9-flow10k-trailing-all'||!Array.isArray(saved.open)
       ||!Array.isArray(saved.closed)||!Array.isArray(saved.seen)){
       return newPaperState();
     }
@@ -518,13 +701,11 @@ async function updateOpenPositions(markets){
   paper.open=remaining;
 }
 
-function winningPlan(market){
-  const yesAsk=Number(market.yes_ask);
-  const noAsk=Number(market.no_ask);
-  if(!Number.isFinite(yesAsk)||!Number.isFinite(noAsk)
-    ||yesAsk<=0||yesAsk>=1||noAsk<=0||noAsk>=1){return null;}
-  if(Math.abs(yesAsk-noAsk)<1e-9){return null;}
-  const plan=yesAsk>noAsk?market.yes_plan:market.no_plan;
+function flowPlan(market){
+  if(!market.flow_available||!['yes','no'].includes(market.flow_first_side)){
+    return null;
+  }
+  const plan=market.selected_plan;
   return plan&&plan.action&&plan.action!=='WAIT'?plan:null;
 }
 
@@ -533,11 +714,11 @@ function openCandidates(markets){
 
   const candidates=markets
     .filter(market=>market.ticker&&!paper.seen.includes(market.ticker)
-      &&validEntryTime(market)&&winningPlan(market))
+      &&validEntryTime(market)&&flowPlan(market))
     .sort((a,b)=>secondsLeft(b)-secondsLeft(a));
 
   for(const market of candidates){
-    const plan=winningPlan(market);
+    const plan=flowPlan(market);
     if(!plan||paper.open.length>=MAX_OPEN){continue;}
 
     if(Number(plan.cost)>paper.cash+1e-9){continue;}
@@ -563,6 +744,12 @@ function openCandidates(markets){
       entryYesAsk:Number(market.yes_ask),
       entryNoBid:Number(market.no_bid),
       entryNoAsk:Number(market.no_ask),
+      entryYesFlow:Number(market.yes_flow),
+      entryNoFlow:Number(market.no_flow),
+      flowThreshold:Number(market.flow_threshold),
+      flowFirstSide:String(market.flow_first_side),
+      flowCrossedAt:market.flow_crossed_at,
+      flowTradeCount:Number(market.flow_trade_count),
       lastExitPrice:null,
       lastPnl:null,
       lastNetProceeds:null,
@@ -592,13 +779,16 @@ function downloadPaperCsv(){
     'contracts','entry_price','exit_price','entry_fee','exit_fee','total_entry_cost',
     'net_proceeds_at_exit','pnl_net','reason','trail_arm_net_proceeds','trail_drop','estimated_arm_price',
     'seconds_left_at_entry','entry_yes_bid','entry_yes_ask','entry_no_bid','entry_no_ask',
+    'entry_yes_flow','entry_no_flow','flow_threshold','flow_first_side','flow_crossed_at','flow_trade_count',
     'trail_armed','peak_net_proceeds','peak_pnl','lowest_pnl'];
   const rows=paper.closed.map(trade=>[
     trade.openedAt,trade.closedAt,trade.closeTime,trade.series,trade.ticker,trade.side,
     trade.contracts,trade.entryPrice,trade.exitPrice,trade.entryFee,trade.exitFee,
     trade.cost,trade.netProceeds,trade.pnl,trade.reason,trade.trailArmNetProceeds,trade.trailDrop,
     trade.estimatedArmPrice,trade.secondsLeftAtEntry,trade.entryYesBid,
-    trade.entryYesAsk,trade.entryNoBid,trade.entryNoAsk,trade.trailArmed,
+    trade.entryYesAsk,trade.entryNoBid,trade.entryNoAsk,trade.entryYesFlow,
+    trade.entryNoFlow,trade.flowThreshold,trade.flowFirstSide,trade.flowCrossedAt,
+    trade.flowTradeCount,trade.trailArmed,
     trade.peakNetProceeds,trade.peakPnl,trade.lowestPnl,
   ]);
   const csv=[headers,...rows].map(row=>row.map(csvCell).join(','))
@@ -606,7 +796,7 @@ function downloadPaperCsv(){
   const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
   const link=document.createElement('a');
   link.href=URL.createObjectURL(blob);
-  link.download='proyecto2_v8_winner_trailing_2c_'+new Date().toISOString().slice(0,10)+'.csv';
+  link.download='proyecto2_v9_flow10k_trailing_2c_'+new Date().toISOString().slice(0,10)+'.csv';
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -658,11 +848,11 @@ function renderPaper(){
 function renderMarkets(markets){
   document.getElementById('rows').innerHTML=markets.map(market=>{
     const remaining=secondsLeft(market);
-    const plan=winningPlan(market);
+    const plan=flowPlan(market);
     const openPosition=paper.open.find(position=>position.ticker===market.ticker);
     const used=paper.seen.includes(market.ticker);
     let css='wait';
-    let label='ESPERANDO LADO GANADOR';
+    let label='ESPERANDO $10K';
 
     if(openPosition){
       css=openPosition.side==='yes'?'yes':'no';
@@ -670,23 +860,28 @@ function renderMarkets(markets){
     }else if(used){
       label='INTERVALO USADO';
     }else if(!validEntryTime(market)){
-      label=remaining>ENTRY_MAX_SECONDS?'AÚN NO COMIENZA':'FUERA DE VENTANA';
+      label=remaining>ENTRY_MAX_SECONDS?'AÚN NO COMIENZA':'SIN APUESTA';
+    }else if(!market.flow_available){
+      label='FLUJO NO DISPONIBLE';
     }else if(plan){
       css=plan.side==='yes'?'yes':'no';
-      label=(paper.active?'ENTRADA ':'LADO GANADOR ')+sideText(plan.side);
+      label=(paper.active?'ENTRADA ':'SEÑAL ')+sideText(plan.side);
     }else if(validEntryTime(market)){
-      label='PRECIO EMPATADO';
+      label='ESPERANDO $10K';
     }
 
     const planText=plan
       ?Number(plan.contracts).toFixed(2)+' contratos · $'+Number(plan.cost).toFixed(2)
         +' · activa aprox. '+priceText(plan.estimated_arm_price)
-      :'Entra cuando un lado quede más caro';
+      :market.flow_window_closed?'Ventana de flujo terminada · sin entrada nueva'
+        :market.flow_available?'Ningún lado ha llegado primero a $10,000'
+          :'No entra sin flujo verificable';
     return `<tr><td>${cryptoName(market.series)}</td>
       <td>${priceText(market.yes_ask)}</td><td>${priceText(market.no_ask)}</td>
+      <td>${flowText(market.yes_flow)}</td><td>${flowText(market.no_flow)}</td>
       <td>${countdown(remaining)}</td><td><span class="pill ${css}">${label}</span></td>
       <td>${planText}</td></tr>`;
-  }).join('')||'<tr><td colspan="6">No hay mercados abiertos ahora</td></tr>';
+  }).join('')||'<tr><td colspan="8">No hay mercados abiertos ahora</td></tr>';
 }
 
 async function refresh(){
