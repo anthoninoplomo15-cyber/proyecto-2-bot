@@ -24,13 +24,14 @@ PRIVATE_KEY_PEM = os.getenv("KALSHI_PRIVATE_KEY", "").replace("\\n", "\n").strip
 SETTINGS = {
     "mode": "PAPER",
     "live_trading": False,
-    "test_version": 6,
+    "test_version": 7,
     "test_bankroll": 14.00,
     "max_total_cost_per_crypto": 1.00,
-    "entry_trigger": 0.40,
-    "net_profit_target": 0.05,
+    "entry_mode": "lower_ask_at_interval_start",
+    "trail_arm_net_proceeds": 1.10,
+    "trail_drop": 0.02,
     "stop_loss": None,
-    "hold_to_settlement_if_no_target": True,
+    "hold_to_settlement_if_never_armed": True,
     "max_open_trades": 14,
     "continuous_operation": True,
     "intervals_per_day": 96,
@@ -185,7 +186,7 @@ def health():
         "ok": True,
         "project": "Proyecto 2",
         "mode": "PAPER",
-        "version": 6,
+        "version": 7,
         "live_trading": False,
     }
 
@@ -242,7 +243,7 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Proyecto 2 · Versión 6</title>
+  <title>Proyecto 2 · Versión 7</title>
   <style>
     :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#07111f;
     color:#eef4ff;font-family:system-ui,Arial}.wrap{max-width:1080px;margin:auto;padding:18px}
@@ -267,7 +268,7 @@ HTML = """
   </style>
 </head>
 <body><div class="wrap">
-  <h1>Proyecto 2 · Versión 6</h1>
+  <h1>Proyecto 2 · Versión 7</h1>
   <div class="tag">MODO PRUEBA · ESTRATEGIA DEL LADO PERDEDOR</div>
 
   <div class="grid">
@@ -288,30 +289,34 @@ HTML = """
     <div class="card"><div class="label">Operaciones positivas</div>
       <div id="paper-wins" class="value">0 / 0 · 0%</div></div>
     <div class="card"><div class="label">Entrada</div>
-      <div class="value">Primer lado ≤40¢</div></div>
+      <div class="value">Lado perdedor al comenzar</div></div>
     <div class="card"><div class="label">Máximo por cripto</div>
       <div class="value">$1 con fee</div></div>
-    <div class="card"><div class="label">Objetivo neto</div>
-      <div class="value">+$0.05</div></div>
+    <div class="card"><div class="label">Activar seguimiento</div>
+      <div class="value">$1.10 netos</div></div>
+    <div class="card"><div class="label">Retroceso permitido</div>
+      <div class="value">2¢ desde el máximo</div></div>
     <div class="card"><div class="label">Stop loss</div>
       <div class="value negative">Ninguno</div></div>
     <div class="card"><div class="label">Ventana de entrada</div>
       <div class="value">Primeros 5 min</div></div>
   </div>
 
-  <div class="note"><strong>Regla automática de esta prueba.</strong> Durante los
-  primeros 5 minutos de cada contrato de 15 minutos, compra el primer lado cuyo
-  <em>ask</em> ejecutable llegue a 40¢ o menos. Usa hasta $1 por criptomoneda,
-  incluyendo la tarifa. Vende al <em>bid</em> real únicamente cuando la ganancia
-  calculada después de ambas tarifas sea por lo menos +$0.05. Si nunca llega,
-  conserva la posición hasta el resultado. Solo puede usar una vez cada cripto
-  en cada intervalo. Vigila las 14 criptomonedas en los 96 intervalos del día,
-  sin límite diario ni pausa automática por cantidad de operaciones.</div>
+  <div class="note"><strong>Regla automática de esta prueba.</strong> Al comenzar
+  cada contrato de 15 minutos, compara los dos <em>ask</em> ejecutables y compra el
+  lado más barato, que es el lado que va perdiendo. Si están empatados, espera a
+  que uno quede por debajo. Usa hasta $1 por criptomoneda, incluyendo la tarifa.
+  No vende antes de que el valor recibido al <em>bid</em>, después de la tarifa de
+  salida, llegue a $1.10. Desde ese momento sigue el valor neto más alto y vende
+  cuando retrocede 2¢. Si nunca llega a $1.10, conserva la posición hasta el
+  resultado. Solo usa una vez cada cripto por intervalo y vigila las 14
+  criptomonedas durante los 96 intervalos del día.</div>
 
   <div class="note risk"><strong>Riesgo importante.</strong> No tener stop loss
-  permite perder casi todo el dólar. Una pérdida de $1 consume aproximadamente
-  veinte objetivos de 5¢. Esta prueba mide la idea; no demuestra que sea rentable
-  ni coloca dinero real. Mantén esta pestaña abierta para que siga registrando.</div>
+  permite perder casi todo el dólar. El seguimiento de 2¢ no protege la posición
+  antes de llegar a $1.10 netos y una caída rápida puede simular una salida por
+  debajo del nivel esperado. Esta prueba mide la idea; no demuestra que sea
+  rentable ni coloca dinero real. Mantén esta pestaña abierta para que registre.</div>
 
   <div class="controls">
     <button id="paper-toggle" class="button" onclick="togglePaper()">
@@ -331,13 +336,13 @@ HTML = """
 
   <h2>Operaciones simuladas abiertas</h2>
   <div class="table-wrap"><table>
-    <thead><tr><th>Cripto</th><th>Lado</th><th>Entrada</th><th>Bid actual</th><th>P&L neto</th><th>Meta estimada</th><th>Tiempo</th></tr></thead>
-    <tbody id="open-rows"><tr><td colspan="7">Ninguna</td></tr></tbody>
+    <thead><tr><th>Cripto</th><th>Lado</th><th>Entrada</th><th>Bid actual</th><th>Valor neto</th><th>P&L neto</th><th>Seguimiento</th><th>Tiempo</th></tr></thead>
+    <tbody id="open-rows"><tr><td colspan="8">Ninguna</td></tr></tbody>
   </table></div>
 
   <h2>Últimos resultados</h2>
   <div class="table-wrap"><table>
-    <thead><tr><th>Cripto</th><th>Lado</th><th>Entrada</th><th>Salida</th><th>Neto</th><th>Mejor P&L</th><th>Motivo</th></tr></thead>
+    <thead><tr><th>Cripto</th><th>Lado</th><th>Entrada</th><th>Salida</th><th>Neto</th><th>Máximo neto</th><th>Motivo</th></tr></thead>
     <tbody id="closed-rows"><tr><td colspan="7">Todavía no hay resultados</td></tr></tbody>
   </table></div>
 
@@ -345,11 +350,11 @@ HTML = """
 </div>
 
 <script>
-const PAPER_KEY='proyecto2_paper_v6_all_intervals';
+const PAPER_KEY='proyecto2_paper_v7_trailing_all_intervals';
 const START_BANKROLL=14.00;
 const MAX_OPEN=14;
-const ENTRY_TRIGGER=0.40;
-const NET_TARGET=0.05;
+const TRAIL_ARM_NET_PROCEEDS=1.10;
+const TRAIL_DROP=0.02;
 const ENTRY_MIN_SECONDS=600;
 const ENTRY_MAX_SECONDS=905;
 let refreshing=false;
@@ -366,7 +371,14 @@ function money(value){
   return '$0.00';
 }
 
+function dollarsText(value){
+  if(value==null||value===''){return '—';}
+  const number=Number(value);
+  return Number.isFinite(number)?'$'+number.toFixed(2):'—';
+}
+
 function priceText(value){
+  if(value==null||value===''){return '—';}
   const number=Number(value);
   return Number.isFinite(number)?Math.round(number*100)+'¢':'—';
 }
@@ -396,13 +408,13 @@ function validEntryTime(market){
 }
 
 function newPaperState(){
-  return {version:'6-all',active:false,cash:START_BANKROLL,open:[],closed:[],seen:[]};
+  return {version:'7-trailing-all',active:false,cash:START_BANKROLL,open:[],closed:[],seen:[]};
 }
 
 function loadPaper(){
   try{
     const saved=JSON.parse(localStorage.getItem(PAPER_KEY));
-    if(!saved||saved.version!=='6-all'||!Array.isArray(saved.open)
+    if(!saved||saved.version!=='7-trailing-all'||!Array.isArray(saved.open)
       ||!Array.isArray(saved.closed)||!Array.isArray(saved.seen)){
       return newPaperState();
     }
@@ -437,7 +449,8 @@ function closeAtPrice(position,price,reason){
   const result=exitResult(position,price);
   paper.cash=roundNumber(paper.cash+result.proceeds);
   paper.closed.push({...position,exitPrice:price,exitFee:result.fee,
-    pnl:result.pnl,reason,closedAt:new Date().toISOString(),
+    netProceeds:result.proceeds,pnl:result.pnl,reason,closedAt:new Date().toISOString(),
+    peakNetProceeds:Math.max(Number(position.peakNetProceeds??result.proceeds),result.proceeds),
     peakPnl:Math.max(Number(position.peakPnl??result.pnl),result.pnl),
     lowestPnl:Math.min(Number(position.lowestPnl??result.pnl),result.pnl)});
 }
@@ -447,9 +460,10 @@ function settlePosition(position,result){
   const proceeds=won?position.contracts:0;
   const pnl=roundNumber(proceeds-position.cost);
   paper.cash=roundNumber(paper.cash+proceeds);
-  paper.closed.push({...position,exitPrice:won?1:0,exitFee:0,pnl,
+  paper.closed.push({...position,exitPrice:won?1:0,exitFee:0,netProceeds:proceeds,pnl,
     reason:won?'RESULTADO GANADOR':'RESULTADO PERDEDOR',
     closedAt:new Date().toISOString(),
+    peakNetProceeds:Math.max(Number(position.peakNetProceeds??proceeds),proceeds),
     peakPnl:Math.max(Number(position.peakPnl??pnl),pnl),
     lowestPnl:Math.min(Number(position.lowestPnl??pnl),pnl)});
 }
@@ -482,14 +496,21 @@ async function updateOpenPositions(markets){
     }
 
     const result=exitResult(original,price);
+    const wasArmed=Boolean(original.trailArmed);
+    const trailArmed=wasArmed||result.proceeds+1e-9>=TRAIL_ARM_NET_PROCEEDS;
+    const previousPeak=Number(original.peakNetProceeds);
+    const peakNetProceeds=trailArmed
+      ?Math.max(Number.isFinite(previousPeak)?previousPeak:result.proceeds,result.proceeds)
+      :null;
     const position={...original,lastExitPrice:price,lastPnl:result.pnl,
+      lastNetProceeds:result.proceeds,trailArmed,peakNetProceeds,
       peakPnl:original.peakPnl==null?result.pnl:Math.max(original.peakPnl,result.pnl),
       lowestPnl:original.lowestPnl==null?result.pnl:Math.min(original.lowestPnl,result.pnl)};
 
-    if(result.pnl+1e-9>=NET_TARGET){
-      closeAtPrice(position,price,'OBJETIVO NETO +$0.05');
+    if(trailArmed&&result.proceeds<=peakNetProceeds-TRAIL_DROP+1e-9){
+      closeAtPrice(position,price,'RETROCESO DE 2¢ DESDE EL MÁXIMO');
     }else{
-      // No hay stop ni salida por tiempo: se conserva hasta la meta o el resultado.
+      // Antes de $1.10 no existe salida. Despues, solo sale al retroceder 2 centavos.
       remaining.push(position);
     }
   }
@@ -497,10 +518,14 @@ async function updateOpenPositions(markets){
   paper.open=remaining;
 }
 
-function activePlans(market){
-  return [market.yes_plan,market.no_plan].filter(plan=>
-    plan&&plan.action&&plan.action!=='WAIT'&&Number(plan.entry_price)<=ENTRY_TRIGGER+1e-9
-  );
+function losingPlan(market){
+  const yesAsk=Number(market.yes_ask);
+  const noAsk=Number(market.no_ask);
+  if(!Number.isFinite(yesAsk)||!Number.isFinite(noAsk)
+    ||yesAsk<=0||yesAsk>=1||noAsk<=0||noAsk>=1){return null;}
+  if(Math.abs(yesAsk-noAsk)<1e-9){return null;}
+  const plan=yesAsk<noAsk?market.yes_plan:market.no_plan;
+  return plan&&plan.action&&plan.action!=='WAIT'?plan:null;
 }
 
 function openCandidates(markets){
@@ -508,14 +533,13 @@ function openCandidates(markets){
 
   const candidates=markets
     .filter(market=>market.ticker&&!paper.seen.includes(market.ticker)
-      &&validEntryTime(market)&&activePlans(market).length>0)
+      &&validEntryTime(market)&&losingPlan(market))
     .sort((a,b)=>secondsLeft(b)-secondsLeft(a));
 
   for(const market of candidates){
-    const plans=activePlans(market);
-    if(plans.length!==1||paper.open.length>=MAX_OPEN){continue;}
+    const plan=losingPlan(market);
+    if(!plan||paper.open.length>=MAX_OPEN){continue;}
 
-    const plan=plans[0];
     if(Number(plan.cost)>paper.cash+1e-9){continue;}
 
     // Solo queda usado cuando la entrada simulada realmente se abre.
@@ -530,8 +554,9 @@ function openCandidates(markets){
       entryPrice:Number(plan.entry_price),
       entryFee:Number(plan.entry_fee),
       cost:Number(plan.cost),
-      targetNet:Number(plan.target_net),
-      estimatedTargetPrice:Number(plan.estimated_target_price),
+      trailArmNetProceeds:Number(plan.trail_arm_net_proceeds),
+      trailDrop:Number(plan.trail_drop),
+      estimatedArmPrice:plan.estimated_arm_price==null?null:Number(plan.estimated_arm_price),
       closeTime:market.close_time,
       secondsLeftAtEntry:roundNumber(remaining,2),
       entryYesBid:Number(market.yes_bid),
@@ -540,6 +565,9 @@ function openCandidates(markets){
       entryNoAsk:Number(market.no_ask),
       lastExitPrice:null,
       lastPnl:null,
+      lastNetProceeds:null,
+      trailArmed:false,
+      peakNetProceeds:null,
       peakPnl:null,
       lowestPnl:null,
       openedAt:new Date().toISOString(),
@@ -562,22 +590,23 @@ function downloadPaperCsv(){
   if(!paper.closed.length){return;}
   const headers=['opened_at','closed_at','interval_close','series','ticker','side',
     'contracts','entry_price','exit_price','entry_fee','exit_fee','total_entry_cost',
-    'pnl_net','reason','entry_trigger','target_net','estimated_target_price',
+    'net_proceeds_at_exit','pnl_net','reason','trail_arm_net_proceeds','trail_drop','estimated_arm_price',
     'seconds_left_at_entry','entry_yes_bid','entry_yes_ask','entry_no_bid','entry_no_ask',
-    'peak_pnl','lowest_pnl'];
+    'trail_armed','peak_net_proceeds','peak_pnl','lowest_pnl'];
   const rows=paper.closed.map(trade=>[
     trade.openedAt,trade.closedAt,trade.closeTime,trade.series,trade.ticker,trade.side,
     trade.contracts,trade.entryPrice,trade.exitPrice,trade.entryFee,trade.exitFee,
-    trade.cost,trade.pnl,trade.reason,ENTRY_TRIGGER,trade.targetNet,
-    trade.estimatedTargetPrice,trade.secondsLeftAtEntry,trade.entryYesBid,
-    trade.entryYesAsk,trade.entryNoBid,trade.entryNoAsk,trade.peakPnl,trade.lowestPnl,
+    trade.cost,trade.netProceeds,trade.pnl,trade.reason,trade.trailArmNetProceeds,trade.trailDrop,
+    trade.estimatedArmPrice,trade.secondsLeftAtEntry,trade.entryYesBid,
+    trade.entryYesAsk,trade.entryNoBid,trade.entryNoAsk,trade.trailArmed,
+    trade.peakNetProceeds,trade.peakPnl,trade.lowestPnl,
   ]);
   const csv=[headers,...rows].map(row=>row.map(csvCell).join(','))
     .join(String.fromCharCode(13,10));
   const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
   const link=document.createElement('a');
   link.href=URL.createObjectURL(blob);
-  link.download='proyecto2_v6_lado_perdedor_'+new Date().toISOString().slice(0,10)+'.csv';
+  link.download='proyecto2_v7_trailing_2c_'+new Date().toISOString().slice(0,10)+'.csv';
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -612,27 +641,28 @@ function renderPaper(){
   document.getElementById('open-rows').innerHTML=paper.open.map(position=>`<tr>
     <td>${cryptoName(position.series)}</td><td>${sideText(position.side)}</td>
     <td>${priceText(position.entryPrice)}</td><td>${priceText(position.lastExitPrice)}</td>
+    <td>${dollarsText(position.lastNetProceeds)}</td>
     <td class="${Number(position.lastPnl)>=0?'positive':'negative'}">${position.lastPnl==null?'—':money(position.lastPnl)}</td>
-    <td>${priceText(position.estimatedTargetPrice)}</td>
+    <td>${position.trailArmed?'ACTIVO · máx. '+dollarsText(position.peakNetProceeds):'Esperando $1.10'}</td>
     <td>${countdown((Date.parse(position.closeTime)-Date.now())/1000)}</td></tr>`).join('')
-    ||'<tr><td colspan="7">Ninguna</td></tr>';
+    ||'<tr><td colspan="8">Ninguna</td></tr>';
 
   document.getElementById('closed-rows').innerHTML=paper.closed.slice(-12).reverse()
     .map(trade=>`<tr><td>${cryptoName(trade.series)}</td><td>${sideText(trade.side)}</td>
     <td>${priceText(trade.entryPrice)}</td><td>${priceText(trade.exitPrice)}</td>
     <td class="${trade.pnl>=0?'positive':'negative'}">${money(trade.pnl)}</td>
-    <td>${trade.peakPnl==null?'—':money(trade.peakPnl)}</td><td>${trade.reason}</td></tr>`)
+    <td>${dollarsText(trade.peakNetProceeds)}</td><td>${trade.reason}</td></tr>`)
     .join('')||'<tr><td colspan="7">Todavía no hay resultados</td></tr>';
 }
 
 function renderMarkets(markets){
   document.getElementById('rows').innerHTML=markets.map(market=>{
     const remaining=secondsLeft(market);
-    const plans=activePlans(market);
+    const plan=losingPlan(market);
     const openPosition=paper.open.find(position=>position.ticker===market.ticker);
     const used=paper.seen.includes(market.ticker);
     let css='wait';
-    let label='ESPERANDO 40¢';
+    let label='ESPERANDO LADO PERDEDOR';
 
     if(openPosition){
       css=openPosition.side==='yes'?'yes':'no';
@@ -641,18 +671,17 @@ function renderMarkets(markets){
       label='INTERVALO USADO';
     }else if(!validEntryTime(market)){
       label=remaining>ENTRY_MAX_SECONDS?'AÚN NO COMIENZA':'FUERA DE VENTANA';
-    }else if(plans.length===1){
-      css=plans[0].side==='yes'?'yes':'no';
-      label=(paper.active?'ENTRADA ':'40¢ DETECTADO ')+sideText(plans[0].side);
-    }else if(plans.length>1){
-      label='PRECIO AMBIGUO';
+    }else if(plan){
+      css=plan.side==='yes'?'yes':'no';
+      label=(paper.active?'ENTRADA ':'LADO PERDEDOR ')+sideText(plan.side);
+    }else if(validEntryTime(market)){
+      label='PRECIO EMPATADO';
     }
 
-    const plan=plans.length===1?plans[0]:null;
     const planText=plan
       ?Number(plan.contracts).toFixed(2)+' contratos · $'+Number(plan.cost).toFixed(2)
-        +' · meta aprox. '+priceText(plan.estimated_target_price)
-      :'Primero que llegue a 40¢';
+        +' · activa aprox. '+priceText(plan.estimated_arm_price)
+      :'Entra cuando un lado quede más barato';
     return `<tr><td>${cryptoName(market.series)}</td>
       <td>${priceText(market.yes_ask)}</td><td>${priceText(market.no_ask)}</td>
       <td>${countdown(remaining)}</td><td><span class="pill ${css}">${label}</span></td>
