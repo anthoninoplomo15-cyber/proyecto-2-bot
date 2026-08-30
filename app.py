@@ -11,7 +11,12 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from flask import Flask, jsonify, render_template_string
 
-from bot import build_entry_plan
+from bot import (
+    DEFAULT_FLOW_THRESHOLD,
+    FLOW_THRESHOLDS,
+    build_entry_plan,
+    flow_threshold_for_series,
+)
 
 
 app = Flask(__name__)
@@ -28,8 +33,9 @@ SETTINGS = {
     "test_version": 9,
     "test_bankroll": 14.00,
     "max_total_cost_per_crypto": 1.00,
-    "entry_mode": "first_taker_outcome_flow_to_10000",
-    "flow_threshold_dollars": 10_000.00,
+    "entry_mode": "first_taker_outcome_flow_to_crypto_threshold",
+    "default_flow_threshold_dollars": DEFAULT_FLOW_THRESHOLD,
+    "flow_threshold_dollars_by_series": FLOW_THRESHOLDS,
     "flow_measure": "executed_taker_outcome_notional",
     "trail_arm_net_proceeds": 1.10,
     "trail_drop": 0.02,
@@ -43,7 +49,6 @@ SETTINGS = {
     "poll_seconds": 3,
 }
 
-FLOW_THRESHOLD = 10_000.00
 INTERVAL_SECONDS = 15 * 60
 FLOW_WINDOW_SECONDS = 5 * 60
 
@@ -178,7 +183,11 @@ def interval_times(close_time):
     return start_ts, start_ts + FLOW_WINDOW_SECONDS
 
 
-def empty_flow(available, window_closed=False):
+def empty_flow(
+    available,
+    window_closed=False,
+    flow_threshold=DEFAULT_FLOW_THRESHOLD,
+):
     starting_value = 0.0 if available and not window_closed else None
     return {
         "flow_available": available,
@@ -188,23 +197,31 @@ def empty_flow(available, window_closed=False):
         "flow_first_side": None,
         "flow_crossed_at": None,
         "flow_trade_count": 0,
-        "flow_threshold": FLOW_THRESHOLD,
+        "flow_threshold": round(float(flow_threshold), 2),
     }
 
 
-def fetch_trade_flow(ticker, close_time):
+def fetch_trade_flow(
+    ticker,
+    close_time,
+    flow_threshold=DEFAULT_FLOW_THRESHOLD,
+):
     """Suma el dinero ejecutado por el taker de cada lado en los primeros 5 min."""
     window = interval_times(close_time)
     if not ticker or window is None:
-        return empty_flow(False)
+        return empty_flow(False, flow_threshold=flow_threshold)
 
     start_ts, deadline_ts = window
     now_ts = dt.datetime.now(dt.timezone.utc).timestamp()
     if now_ts < start_ts:
-        return empty_flow(True)
+        return empty_flow(True, flow_threshold=flow_threshold)
     if now_ts >= deadline_ts:
         # La ventana ya cerro. Nunca se abre una entrada nueva despues de 5 min.
-        return empty_flow(True, window_closed=True)
+        return empty_flow(
+            True,
+            window_closed=True,
+            flow_threshold=flow_threshold,
+        )
 
     trades = []
     cursor = None
@@ -270,7 +287,7 @@ def fetch_trade_flow(ticker, close_time):
     crossed_at = None
     for executed_at, _trade_id, side, amount in sorted(normalized):
         totals[side] += amount
-        if first_side is None and totals[side] + 1e-9 >= FLOW_THRESHOLD:
+        if first_side is None and totals[side] + 1e-9 >= flow_threshold:
             first_side = side
             crossed_at = dt.datetime.fromtimestamp(
                 executed_at, tz=dt.timezone.utc
@@ -284,11 +301,12 @@ def fetch_trade_flow(ticker, close_time):
         "flow_first_side": first_side,
         "flow_crossed_at": crossed_at,
         "flow_trade_count": len(normalized),
-        "flow_threshold": FLOW_THRESHOLD,
+        "flow_threshold": round(float(flow_threshold), 2),
     }
 
 
 def scan_one_series(series_ticker):
+    flow_threshold = flow_threshold_for_series(series_ticker)
     response = requests.get(
         BASE_URL + "/markets",
         params={"series_ticker": series_ticker, "status": "open", "limit": 5},
@@ -311,10 +329,18 @@ def scan_one_series(series_ticker):
     selected = markets[:1]
     for market in selected:
         try:
-            market.update(fetch_trade_flow(market.get("ticker"), market.get("close_time")))
+            market.update(
+                fetch_trade_flow(
+                    market.get("ticker"),
+                    market.get("close_time"),
+                    flow_threshold=flow_threshold,
+                )
+            )
         except (requests.exceptions.RequestException, TypeError, ValueError):
             # Falla cerrada: sin flujo verificable no existe entrada.
-            market.update(empty_flow(False))
+            market.update(
+                empty_flow(False, flow_threshold=flow_threshold)
+            )
     return selected
 
 
@@ -341,8 +367,15 @@ def add_strategy_plans(markets):
         no_ask = opposite_price(yes_bid)
         item["no_bid"] = no_bid
         item["no_ask"] = no_ask
-        item["yes_plan"] = build_entry_plan("yes", yes_ask)
-        item["no_plan"] = build_entry_plan("no", no_ask)
+        flow_threshold = item.get(
+            "flow_threshold", DEFAULT_FLOW_THRESHOLD
+        )
+        item["yes_plan"] = build_entry_plan(
+            "yes", yes_ask, flow_threshold=flow_threshold
+        )
+        item["no_plan"] = build_entry_plan(
+            "no", no_ask, flow_threshold=flow_threshold
+        )
         first_side = item.get("flow_first_side")
         item["selected_plan"] = (
             item["yes_plan"] if first_side == "yes"
@@ -442,7 +475,7 @@ HTML = """
 </head>
 <body><div class="wrap">
   <h1>Proyecto 2 · Versión 9</h1>
-  <div class="tag">MODO PRUEBA · PRIMER LADO EN $10K DE FLUJO</div>
+  <div class="tag">MODO PRUEBA · LÍMITE DE FLUJO SEGÚN CRIPTO</div>
 
   <div class="grid">
     <div class="card"><div class="label">Kalshi API</div>
@@ -462,7 +495,7 @@ HTML = """
     <div class="card"><div class="label">Operaciones positivas</div>
       <div id="paper-wins" class="value">0 / 0 · 0%</div></div>
     <div class="card"><div class="label">Entrada</div>
-      <div class="value">Primer lado en $10K</div></div>
+      <div class="value">Primer lado en su límite</div></div>
     <div class="card"><div class="label">Máximo por cripto</div>
       <div class="value">$1 con fee</div></div>
     <div class="card"><div class="label">Activar seguimiento</div>
@@ -478,9 +511,10 @@ HTML = """
   <div class="note"><strong>Regla automática de esta prueba.</strong> Al comenzar
   cada contrato de 15 minutos, pone en cero el flujo de UP y DOWN. Suma por
   separado el dinero de las operaciones ejecutadas según el lado del <em>taker</em>
-  y compra el primer lado que alcance $10,000 durante los primeros 5 minutos. Si
-  ninguno alcanza $10,000, no abre una posición en ese intervalo. Usa hasta $1
-  por criptomoneda, incluyendo la tarifa.
+  y compra el primer lado que alcance el límite de su cripto durante los primeros
+  5 minutos: BTC $10,000; ETH $5,000; SOL y XRP $2,000; las demás $1,000. Si
+  ninguno alcanza su límite, no abre una posición en ese intervalo. Usa hasta
+  $1 por criptomoneda, incluyendo la tarifa.
   No vende antes de que el valor recibido al <em>bid</em>, después de la tarifa de
   salida, llegue a $1.10. Desde ese momento sigue el valor neto más alto y vende
   cuando retrocede 2¢. Si nunca llega a $1.10, conserva la posición hasta el
@@ -490,7 +524,7 @@ HTML = """
   <div class="note risk"><strong>Riesgo importante.</strong> No tener stop loss
   permite perder casi todo el dólar. El seguimiento de 2¢ no protege la posición
   antes de llegar a $1.10 netos y una caída rápida puede simular una salida por
-  debajo del nivel esperado. Alcanzar $10,000 de flujo tampoco garantiza el
+  debajo del nivel esperado. Alcanzar el límite de flujo tampoco garantiza el
   resultado. Esta prueba mide la idea; no demuestra que sea
   rentable ni coloca dinero real. Mantén esta pestaña abierta para que registre.</div>
 
@@ -848,11 +882,12 @@ function renderPaper(){
 function renderMarkets(markets){
   document.getElementById('rows').innerHTML=markets.map(market=>{
     const remaining=secondsLeft(market);
+    const thresholdText=flowText(market.flow_threshold);
     const plan=flowPlan(market);
     const openPosition=paper.open.find(position=>position.ticker===market.ticker);
     const used=paper.seen.includes(market.ticker);
     let css='wait';
-    let label='ESPERANDO $10K';
+    let label='ESPERANDO '+thresholdText;
 
     if(openPosition){
       css=openPosition.side==='yes'?'yes':'no';
@@ -867,14 +902,14 @@ function renderMarkets(markets){
       css=plan.side==='yes'?'yes':'no';
       label=(paper.active?'ENTRADA ':'SEÑAL ')+sideText(plan.side);
     }else if(validEntryTime(market)){
-      label='ESPERANDO $10K';
+      label='ESPERANDO '+thresholdText;
     }
 
     const planText=plan
       ?Number(plan.contracts).toFixed(2)+' contratos · $'+Number(plan.cost).toFixed(2)
         +' · activa aprox. '+priceText(plan.estimated_arm_price)
       :market.flow_window_closed?'Ventana de flujo terminada · sin entrada nueva'
-        :market.flow_available?'Ningún lado ha llegado primero a $10,000'
+        :market.flow_available?'Ningún lado ha llegado primero a '+thresholdText
           :'No entra sin flujo verificable';
     return `<tr><td>${cryptoName(market.series)}</td>
       <td>${priceText(market.yes_ask)}</td><td>${priceText(market.no_ask)}</td>
