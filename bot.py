@@ -1,6 +1,6 @@
-"""Motor matematico PAPER de Proyecto 2, version 7.
+"""Motor matematico PAPER de Proyecto 2, version 8.
 
-La estrategia compra el lado perdedor apenas comienza cada intervalo. Arriesga
+La estrategia compra el lado ganador apenas comienza cada intervalo. Arriesga
 como maximo $1, incluyendo la tarifa de entrada, no usa stop loss y activa un
 trailing de 2 centavos cuando el valor de venta neto supera $1.10.
 
@@ -116,14 +116,14 @@ def first_arm_price(
     return None
 
 
-def build_loser_plan(
+def build_entry_plan(
     side,
     entry_price,
     max_total=MAX_TOTAL_COST,
     arm_net_proceeds=TRAIL_ARM_NET_PROCEEDS,
     trail_drop=TRAIL_DROP,
 ):
-    """Crea un plan PAPER para el lado perdedor seleccionado por la app."""
+    """Crea un plan PAPER para el lado ganador seleccionado por la app."""
     normalized_side = str(side or "").lower()
     price = _number(entry_price)
     if normalized_side not in {"yes", "no"}:
@@ -150,5 +150,5 @@ def build_loser_plan(
         "estimated_arm_price": arm_price,
         "stop_loss": None,
         "hold_if_never_armed": True,
-        "reason": "Lado perdedor al comenzar el intervalo",
+        "reason": "Lado ganador al comenzar el intervalo",
     }

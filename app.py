@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from flask import Flask, jsonify, render_template_string
 
-from bot import build_loser_plan
+from bot import build_entry_plan
 
 
 app = Flask(__name__)
@@ -24,10 +24,10 @@ PRIVATE_KEY_PEM = os.getenv("KALSHI_PRIVATE_KEY", "").replace("\\n", "\n").strip
 SETTINGS = {
     "mode": "PAPER",
     "live_trading": False,
-    "test_version": 7,
+    "test_version": 8,
     "test_bankroll": 14.00,
     "max_total_cost_per_crypto": 1.00,
-    "entry_mode": "lower_ask_at_interval_start",
+    "entry_mode": "higher_ask_at_interval_start",
     "trail_arm_net_proceeds": 1.10,
     "trail_drop": 0.02,
     "stop_loss": None,
@@ -174,8 +174,8 @@ def add_strategy_plans(markets):
         no_ask = opposite_price(yes_bid)
         item["no_bid"] = no_bid
         item["no_ask"] = no_ask
-        item["yes_plan"] = build_loser_plan("yes", yes_ask)
-        item["no_plan"] = build_loser_plan("no", no_ask)
+        item["yes_plan"] = build_entry_plan("yes", yes_ask)
+        item["no_plan"] = build_entry_plan("no", no_ask)
         enriched.append(item)
     return enriched
 
@@ -186,7 +186,7 @@ def health():
         "ok": True,
         "project": "Proyecto 2",
         "mode": "PAPER",
-        "version": 7,
+        "version": 8,
         "live_trading": False,
     }
 
@@ -243,7 +243,7 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Proyecto 2 · Versión 7</title>
+  <title>Proyecto 2 · Versión 8</title>
   <style>
     :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#07111f;
     color:#eef4ff;font-family:system-ui,Arial}.wrap{max-width:1080px;margin:auto;padding:18px}
@@ -268,8 +268,8 @@ HTML = """
   </style>
 </head>
 <body><div class="wrap">
-  <h1>Proyecto 2 · Versión 7</h1>
-  <div class="tag">MODO PRUEBA · ESTRATEGIA DEL LADO PERDEDOR</div>
+  <h1>Proyecto 2 · Versión 8</h1>
+  <div class="tag">MODO PRUEBA · ESTRATEGIA DEL LADO GANADOR</div>
 
   <div class="grid">
     <div class="card"><div class="label">Kalshi API</div>
@@ -289,7 +289,7 @@ HTML = """
     <div class="card"><div class="label">Operaciones positivas</div>
       <div id="paper-wins" class="value">0 / 0 · 0%</div></div>
     <div class="card"><div class="label">Entrada</div>
-      <div class="value">Lado perdedor al comenzar</div></div>
+      <div class="value">Lado ganador al comenzar</div></div>
     <div class="card"><div class="label">Máximo por cripto</div>
       <div class="value">$1 con fee</div></div>
     <div class="card"><div class="label">Activar seguimiento</div>
@@ -304,8 +304,8 @@ HTML = """
 
   <div class="note"><strong>Regla automática de esta prueba.</strong> Al comenzar
   cada contrato de 15 minutos, compara los dos <em>ask</em> ejecutables y compra el
-  lado más barato, que es el lado que va perdiendo. Si están empatados, espera a
-  que uno quede por debajo. Usa hasta $1 por criptomoneda, incluyendo la tarifa.
+  lado más caro, que es el lado que va ganando en ese momento. Si están empatados,
+  espera a que uno quede por encima. Usa hasta $1 por criptomoneda, incluyendo la tarifa.
   No vende antes de que el valor recibido al <em>bid</em>, después de la tarifa de
   salida, llegue a $1.10. Desde ese momento sigue el valor neto más alto y vende
   cuando retrocede 2¢. Si nunca llega a $1.10, conserva la posición hasta el
@@ -350,7 +350,7 @@ HTML = """
 </div>
 
 <script>
-const PAPER_KEY='proyecto2_paper_v7_trailing_all_intervals';
+const PAPER_KEY='proyecto2_paper_v8_winner_trailing_all_intervals';
 const START_BANKROLL=14.00;
 const MAX_OPEN=14;
 const TRAIL_ARM_NET_PROCEEDS=1.10;
@@ -408,13 +408,13 @@ function validEntryTime(market){
 }
 
 function newPaperState(){
-  return {version:'7-trailing-all',active:false,cash:START_BANKROLL,open:[],closed:[],seen:[]};
+  return {version:'8-winner-trailing-all',active:false,cash:START_BANKROLL,open:[],closed:[],seen:[]};
 }
 
 function loadPaper(){
   try{
     const saved=JSON.parse(localStorage.getItem(PAPER_KEY));
-    if(!saved||saved.version!=='7-trailing-all'||!Array.isArray(saved.open)
+    if(!saved||saved.version!=='8-winner-trailing-all'||!Array.isArray(saved.open)
       ||!Array.isArray(saved.closed)||!Array.isArray(saved.seen)){
       return newPaperState();
     }
@@ -518,13 +518,13 @@ async function updateOpenPositions(markets){
   paper.open=remaining;
 }
 
-function losingPlan(market){
+function winningPlan(market){
   const yesAsk=Number(market.yes_ask);
   const noAsk=Number(market.no_ask);
   if(!Number.isFinite(yesAsk)||!Number.isFinite(noAsk)
     ||yesAsk<=0||yesAsk>=1||noAsk<=0||noAsk>=1){return null;}
   if(Math.abs(yesAsk-noAsk)<1e-9){return null;}
-  const plan=yesAsk<noAsk?market.yes_plan:market.no_plan;
+  const plan=yesAsk>noAsk?market.yes_plan:market.no_plan;
   return plan&&plan.action&&plan.action!=='WAIT'?plan:null;
 }
 
@@ -533,11 +533,11 @@ function openCandidates(markets){
 
   const candidates=markets
     .filter(market=>market.ticker&&!paper.seen.includes(market.ticker)
-      &&validEntryTime(market)&&losingPlan(market))
+      &&validEntryTime(market)&&winningPlan(market))
     .sort((a,b)=>secondsLeft(b)-secondsLeft(a));
 
   for(const market of candidates){
-    const plan=losingPlan(market);
+    const plan=winningPlan(market);
     if(!plan||paper.open.length>=MAX_OPEN){continue;}
 
     if(Number(plan.cost)>paper.cash+1e-9){continue;}
@@ -606,7 +606,7 @@ function downloadPaperCsv(){
   const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
   const link=document.createElement('a');
   link.href=URL.createObjectURL(blob);
-  link.download='proyecto2_v7_trailing_2c_'+new Date().toISOString().slice(0,10)+'.csv';
+  link.download='proyecto2_v8_winner_trailing_2c_'+new Date().toISOString().slice(0,10)+'.csv';
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -658,11 +658,11 @@ function renderPaper(){
 function renderMarkets(markets){
   document.getElementById('rows').innerHTML=markets.map(market=>{
     const remaining=secondsLeft(market);
-    const plan=losingPlan(market);
+    const plan=winningPlan(market);
     const openPosition=paper.open.find(position=>position.ticker===market.ticker);
     const used=paper.seen.includes(market.ticker);
     let css='wait';
-    let label='ESPERANDO LADO PERDEDOR';
+    let label='ESPERANDO LADO GANADOR';
 
     if(openPosition){
       css=openPosition.side==='yes'?'yes':'no';
@@ -673,7 +673,7 @@ function renderMarkets(markets){
       label=remaining>ENTRY_MAX_SECONDS?'AÚN NO COMIENZA':'FUERA DE VENTANA';
     }else if(plan){
       css=plan.side==='yes'?'yes':'no';
-      label=(paper.active?'ENTRADA ':'LADO PERDEDOR ')+sideText(plan.side);
+      label=(paper.active?'ENTRADA ':'LADO GANADOR ')+sideText(plan.side);
     }else if(validEntryTime(market)){
       label='PRECIO EMPATADO';
     }
@@ -681,7 +681,7 @@ function renderMarkets(markets){
     const planText=plan
       ?Number(plan.contracts).toFixed(2)+' contratos · $'+Number(plan.cost).toFixed(2)
         +' · activa aprox. '+priceText(plan.estimated_arm_price)
-      :'Entra cuando un lado quede más barato';
+      :'Entra cuando un lado quede más caro';
     return `<tr><td>${cryptoName(market.series)}</td>
       <td>${priceText(market.yes_ask)}</td><td>${priceText(market.no_ask)}</td>
       <td>${countdown(remaining)}</td><td><span class="pill ${css}">${label}</span></td>
