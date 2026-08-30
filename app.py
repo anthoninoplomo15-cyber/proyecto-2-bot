@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from flask import Flask, jsonify, render_template_string
 
-from bot import analyze_flow, build_paper_plan
+from bot import analyze_flow, analyze_reference, build_paper_plan
 
 
 app = Flask(__name__)
@@ -24,7 +24,7 @@ PRIVATE_KEY_PEM = os.getenv("KALSHI_PRIVATE_KEY", "").replace("\\n", "\n").strip
 SETTINGS = {
     "mode": "PAPER",
     "live_trading": False,
-    "test_version": 4,
+    "test_version": 5,
     "test_bankroll": 10.00,
     "max_cost_per_trade": 2.00,
     "profit_target": 0.20,
@@ -33,13 +33,16 @@ SETTINGS = {
     "checkpoint_trades": 20,
     "final_test_goal": 100,
     "required_confirmed_windows": 2,
-    "required_price_windows": 2,
+    "required_reference_windows": 2,
     "minimum_window_dominance": 0.75,
     "minimum_window_contracts": 50,
     "maximum_spread": 0.01,
     "entry_window_seconds": [180, 360],
     "flow_windows_seconds": [30, 60, 90],
-    "price_windows_seconds": [30, 60, 90],
+    "reference_windows_seconds": [30, 60, 90],
+    "minimum_reference_distance_pct": 0.0005,
+    "reference_range_multiplier": 1.25,
+    "maximum_reference_age_seconds": 30,
 }
 
 SERIES = [
@@ -49,8 +52,8 @@ SERIES = [
     "KXHYPE15M", "KXSUI15M",
 ]
 
-# Reduce las consultas publicas: el flujo se vuelve a medir cada 45 segundos.
-FLOW_CACHE_SECONDS = 45
+# Actualiza flujo y referencia con suficiente rapidez sin saturar la API.
+FLOW_CACHE_SECONDS = 15
 FLOW_CACHE = {"updated": 0.0, "markets": {}}
 
 
@@ -130,7 +133,14 @@ def scan_one_series(series_ticker):
         {
             "series": series_ticker,
             "ticker": market.get("ticker"),
+            "event_ticker": market.get("event_ticker") or market.get("ticker"),
             "title": market.get("title") or market.get("subtitle") or series_ticker,
+            "subtitle": market.get("subtitle"),
+            "yes_sub_title": market.get("yes_sub_title"),
+            "rules_primary": market.get("rules_primary"),
+            "floor_strike": market.get("floor_strike"),
+            "functional_strike": market.get("functional_strike"),
+            "custom_strike": market.get("custom_strike"),
             "close_time": market.get("close_time"),
             "yes_bid": dollars(market, "yes_bid_dollars", "yes_bid"),
             "yes_ask": dollars(market, "yes_ask_dollars", "yes_ask"),
@@ -158,22 +168,102 @@ def scan_markets():
 def analyze_one_market(market):
     ticker = market.get("ticker")
     try:
-        signal = analyze_flow(ticker)
+        flow_signal = analyze_flow(ticker)
+        reference_signal = analyze_reference(market)
+
+        flow_side = str(flow_signal.get("side") or "").lower()
+        reference_side = str(reference_signal.get("side") or "").lower()
+        flow_ready = flow_signal.get("action") != "WAIT"
+        reference_ready = bool(reference_signal.get("eligible"))
+
+        if reference_ready and flow_ready and flow_side == reference_side:
+            signal = dict(flow_signal)
+            signal["action"] = "PAPER_BUY_" + reference_side.upper()
+            signal["side"] = reference_side
+            signal["reason"] = (
+                reference_signal.get("reason", "Referencia confirmada")
+                + " · flujo coincide"
+            )
+        elif not reference_ready:
+            signal = {
+                "ticker": ticker,
+                "action": "WAIT",
+                "side": None,
+                "reason": reference_signal.get(
+                    "reason", "Referencia real no confirmada"
+                ),
+                "windows": flow_signal.get("windows", {}),
+            }
+        elif not flow_ready:
+            signal = {
+                "ticker": ticker,
+                "action": "WAIT",
+                "side": None,
+                "reason": flow_signal.get("reason", "Flujo no confirmado"),
+                "windows": flow_signal.get("windows", {}),
+            }
+        else:
+            signal = {
+                "ticker": ticker,
+                "action": "WAIT",
+                "side": None,
+                "reason": "Referencia y flujo apuntan a lados contrarios",
+                "windows": flow_signal.get("windows", {}),
+            }
+
         plan = build_paper_plan(
             signal,
             market.get("yes_bid"),
             market.get("yes_ask"),
         )
     except requests.RequestException:
-        signal = {
+        flow_signal = {
             "ticker": ticker,
             "action": "WAIT",
             "side": None,
             "reason": "Datos de flujo temporalmente no disponibles",
             "windows": {},
         }
+        reference_signal = {
+            "eligible": False,
+            "side": None,
+            "reason": "Referencia real temporalmente no disponible",
+        }
+        signal = {
+            "ticker": ticker,
+            "action": "WAIT",
+            "side": None,
+            "reason": "Datos temporales no disponibles",
+            "windows": {},
+        }
         plan = {"action": "WAIT", "reason": signal["reason"]}
-    return ticker, {"signal": signal, "plan": plan}
+    except (TypeError, ValueError, KeyError):
+        flow_signal = {
+            "ticker": ticker,
+            "action": "WAIT",
+            "side": None,
+            "reason": "Datos de flujo invalidos",
+            "windows": {},
+        }
+        reference_signal = {
+            "eligible": False,
+            "side": None,
+            "reason": "Formato de referencia no reconocido",
+        }
+        signal = {
+            "ticker": ticker,
+            "action": "WAIT",
+            "side": None,
+            "reason": "Datos no utilizables",
+            "windows": {},
+        }
+        plan = {"action": "WAIT", "reason": signal["reason"]}
+    return ticker, {
+        "signal": signal,
+        "flow_signal": flow_signal,
+        "reference_signal": reference_signal,
+        "plan": plan,
+    }
 
 
 def add_paper_analysis(markets):
@@ -217,6 +307,23 @@ def add_paper_analysis(markets):
                 "windows": {},
             },
         )
+        item["flow_signal"] = result.get(
+            "flow_signal",
+            {
+                "action": "WAIT",
+                "side": None,
+                "reason": "Analizando flujo",
+                "windows": {},
+            },
+        )
+        item["reference_signal"] = result.get(
+            "reference_signal",
+            {
+                "eligible": False,
+                "side": None,
+                "reason": "Analizando referencia real",
+            },
+        )
         item["paper_plan"] = result.get(
             "plan",
             {"action": "WAIT", "reason": "Analizando flujo"},
@@ -231,7 +338,7 @@ def health():
         "ok": True,
         "project": "Proyecto 2",
         "mode": "PAPER",
-        "version": 4,
+        "version": 5,
     }
 
 
@@ -290,7 +397,7 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Proyecto 2 · Versión 4</title>
+  <title>Proyecto 2 · Versión 5</title>
   <style>
     :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#07111f;
     color:#eef4ff;font-family:system-ui,Arial}.wrap{max-width:1000px;margin:auto;padding:18px}
@@ -315,7 +422,7 @@ HTML = """
   </style>
 </head>
 <body><div class="wrap">
-  <h1>Proyecto 2 · Versión 4</h1>
+  <h1>Proyecto 2 · Versión 5</h1>
   <div class="tag">MODO PRUEBA · SIN ÓRDENES REALES</div>
 
   <div class="grid">
@@ -337,14 +444,21 @@ HTML = """
       <div class="value">+$0.20 / −$0.10</div></div>
     <div class="card"><div class="label">Filtro de flujo</div>
       <div class="value">2/3 · ≥75% · ≥50</div></div>
-    <div class="card"><div class="label">Confirmación de precio</div>
-      <div class="value">2/3 · spread ≤1¢</div></div>
+    <div class="card"><div class="label">Referencia frente al objetivo</div>
+      <div class="value">2/3 · margen ≥1.00x</div></div>
+    <div class="card"><div class="label">Ruido reciente</div>
+      <div class="value">Rango × 1.25</div></div>
+    <div class="card"><div class="label">Spread máximo</div>
+      <div class="value">1¢</div></div>
   </div>
 
   <div class="note"><strong>Simulación controlada.</strong> Las entradas, salidas,
   spread y tarifas se calculan con dinero ficticio. Esta versión elige una sola
-  criptomoneda por intervalo de 15 minutos y exige 2 de 3 ventanas de flujo,
-  además de 2 de 3 confirmaciones de movimiento del precio del contrato.
+  criptomoneda por intervalo de 15 minutos. Primero compara la referencia real
+  con el objetivo del contrato, exige estabilidad en 2 de 3 ventanas y una
+  distancia superior al ruido reciente; después exige que el flujo coincida.
+  Si la referencia falta o está atrasada, no entra.
+  Esta prueba no garantiza rentabilidad.
   Se pausará automáticamente al llegar a 20 pruebas para revisar el resultado.
   Para registrar pruebas, deja esta pestaña abierta y la computadora encendida.</div>
 
@@ -360,27 +474,27 @@ HTML = """
 
   <h2>Mercados cripto de 15 minutos</h2>
   <div class="table-wrap"><table>
-    <thead><tr><th>Serie</th><th>YES compra</th><th>Señal</th><th>Plan simulado</th></tr></thead>
-    <tbody id="rows"><tr><td colspan="4">Buscando mercados…</td></tr></tbody>
+    <thead><tr><th>Serie</th><th>YES compra</th><th>Referencia / objetivo</th><th>Señal</th><th>Plan simulado</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="5">Buscando mercados…</td></tr></tbody>
   </table></div>
 
   <h2>Operaciones simuladas abiertas</h2>
   <div class="table-wrap"><table>
-    <thead><tr><th>Serie</th><th>Lado</th><th>Entrada</th><th>Objetivo</th><th>Stop</th></tr></thead>
-    <tbody id="open-rows"><tr><td colspan="5">Ninguna</td></tr></tbody>
+    <thead><tr><th>Serie</th><th>Lado</th><th>Entrada</th><th>Objetivo</th><th>Stop</th><th>Ref. / meta</th></tr></thead>
+    <tbody id="open-rows"><tr><td colspan="6">Ninguna</td></tr></tbody>
   </table></div>
 
   <h2>Últimos resultados</h2>
   <div class="table-wrap"><table>
-    <thead><tr><th>Serie</th><th>Lado</th><th>Salida</th><th>Resultado neto</th><th>Dominio</th><th>Motivo</th></tr></thead>
-    <tbody id="closed-rows"><tr><td colspan="6">Todavía no hay resultados</td></tr></tbody>
+    <thead><tr><th>Serie</th><th>Lado</th><th>Salida</th><th>Resultado neto</th><th>Ref./ruido</th><th>Dominio</th><th>Motivo</th></tr></thead>
+    <tbody id="closed-rows"><tr><td colspan="7">Todavía no hay resultados</td></tr></tbody>
   </table></div>
 
   <div id="updated" class="foot"></div>
 </div>
 
 <script>
-const PAPER_KEY='proyecto2_paper_v4';
+const PAPER_KEY='proyecto2_paper_v5';
 const START_BANKROLL=10.00;
 const MAX_OPEN=1;
 const CHECKPOINT_GOAL=20;
@@ -390,13 +504,13 @@ const REQUIRED_FLOW_CONFIRMATIONS=2;
 const MIN_WINDOW_TRADES=8;
 const MIN_WINDOW_CONTRACTS=50;
 const MIN_WINDOW_DOMINANCE=0.75;
-const PRICE_WINDOWS=[30,60,90];
-const REQUIRED_PRICE_CONFIRMATIONS=2;
-const MIN_PRICE_MOVE=0.01;
+const REFERENCE_WINDOWS=['30','60','90'];
+const REQUIRED_REFERENCE_CONFIRMATIONS=2;
+const MIN_REFERENCE_RATIO=1.0;
+const MAX_REFERENCE_AGE=30;
 const MAX_SPREAD=0.01;
 const ENTRY_MIN_SECONDS=180;
 const ENTRY_MAX_SECONDS=360;
-const priceHistory=new Map();
 let refreshing=false;
 
 function roundNumber(value,digits=4){
@@ -411,15 +525,23 @@ function money(value){
   return '$0.00';
 }
 
+function referencePrice(value){
+  const number=Number(value);
+  if(!Number.isFinite(number)||number<=0){return '—';}
+  const digits=number>=1000?2:number>=1?4:6;
+  return '$'+number.toLocaleString(undefined,{minimumFractionDigits:digits,
+    maximumFractionDigits:digits});
+}
+
 function newPaperState(){
-  return {version:4,active:false,cash:START_BANKROLL,open:[],closed:[],seen:[],
+  return {version:5,active:false,cash:START_BANKROLL,open:[],closed:[],seen:[],
     usedIntervals:[]};
 }
 
 function loadPaper(){
   try{
     const saved=JSON.parse(localStorage.getItem(PAPER_KEY));
-    if(!saved||saved.version!==4||!Array.isArray(saved.open)||
+    if(!saved||saved.version!==5||!Array.isArray(saved.open)||
        !Array.isArray(saved.closed)||!Array.isArray(saved.seen)||
        !Array.isArray(saved.usedIntervals)){return newPaperState();}
     return {...newPaperState(),...saved,cash:Number(saved.cash)};
@@ -497,7 +619,8 @@ async function updateOpenPositions(markets){
     if(price>=position.targetPrice){
       closeAtPrice(position,position.targetPrice,'OBJETIVO');
     }else if(price<=position.stopPrice){
-      closeAtPrice(position,position.stopPrice,'STOP');
+      // Usa el bid real disponible: un salto puede perder mas de $0.10.
+      closeAtPrice(position,price,'STOP');
     }else if(secondsLeft<=30){
       closeAtPrice(position,price,'TIEMPO');
     }else{
@@ -509,7 +632,7 @@ async function updateOpenPositions(markets){
 }
 
 function strictFlow(market){
-  const signal=market.paper_signal||{};
+  const signal=market.flow_signal||{};
   const side=String(signal.side||'').toLowerCase();
   if(!['yes','no'].includes(side)){
     return {eligible:false,reason:'Sin dirección confirmada'};
@@ -543,72 +666,31 @@ function strictFlow(market){
     score:averageDominance*1000+Math.min(minimumContracts,999)/1000};
 }
 
-function marketMid(market){
-  const bid=Number(market.yes_bid);
-  const ask=Number(market.yes_ask);
-  if(!Number.isFinite(bid)||!Number.isFinite(ask)||bid<=0||ask>=1||bid>ask){
-    return null;
+function strictReference(market){
+  const reference=market.reference_signal||{};
+  const side=String(reference.side||'').toLowerCase();
+  const confirmed=Number(reference.confirmed_windows||0);
+  const ratio=Number(reference.distance_ratio||0);
+  const age=Number(reference.latest_age_seconds);
+
+  if(!reference.eligible||!['yes','no'].includes(side)){
+    return {eligible:false,side:null,reason:reference.reason||'Referencia no confirmada',
+      confirmedWindows:confirmed,ratio,raw:reference};
   }
-  return roundNumber((bid+ask)/2,4);
-}
-
-function recordPriceHistory(markets){
-  const now=Date.now();
-  const oldest=now-105000;
-  for(const [ticker,history] of priceHistory.entries()){
-    const recent=history.filter(sample=>sample.ts>=oldest);
-    if(recent.length){priceHistory.set(ticker,recent);}
-    else{priceHistory.delete(ticker);}
+  if(confirmed<REQUIRED_REFERENCE_CONFIRMATIONS){
+    return {eligible:false,side,reason:'Referencia confirma '+confirmed+'/3 ventanas',
+      confirmedWindows:confirmed,ratio,raw:reference};
   }
-
-  for(const market of markets){
-    const mid=marketMid(market);
-    if(mid==null||!market.ticker){continue;}
-    const history=priceHistory.get(market.ticker)||[];
-    history.push({ts:now,mid});
-    priceHistory.set(market.ticker,history.filter(sample=>sample.ts>=oldest));
+  if(!Number.isFinite(ratio)||ratio<MIN_REFERENCE_RATIO){
+    return {eligible:false,side,reason:'Distancia menor que el ruido reciente',
+      confirmedWindows:confirmed,ratio,raw:reference};
   }
-}
-
-function nearestPriceSample(history,targetMs){
-  if(!history.length){return null;}
-  let best=null;
-  let distance=Infinity;
-  for(const sample of history){
-    const currentDistance=Math.abs(sample.ts-targetMs);
-    if(currentDistance<distance){best=sample;distance=currentDistance;}
+  if(!Number.isFinite(age)||age>MAX_REFERENCE_AGE){
+    return {eligible:false,side,reason:'Referencia real atrasada',
+      confirmedWindows:confirmed,ratio,raw:reference};
   }
-  return distance<=12000?best:null;
-}
-
-function priceConfirmation(market,side){
-  const current=marketMid(market);
-  const history=priceHistory.get(market.ticker)||[];
-  if(current==null){return {eligible:false,reason:'Precio del contrato no disponible'};}
-
-  const now=Date.now();
-  const changes={};
-  let confirmedWindows=0;
-
-  for(const seconds of PRICE_WINDOWS){
-    const sample=nearestPriceSample(history,now-seconds*1000);
-    if(!sample){
-      changes[String(seconds)]={delta:null,direction:null};
-      continue;
-    }
-    const delta=roundNumber(current-sample.mid,4);
-    const direction=delta>=MIN_PRICE_MOVE?'yes':delta<=-MIN_PRICE_MOVE?'no':null;
-    if(direction===side){confirmedWindows+=1;}
-    changes[String(seconds)]={delta,direction};
-  }
-
-  if(confirmedWindows<REQUIRED_PRICE_CONFIRMATIONS){
-    return {eligible:false,reason:'Precio confirma '+confirmedWindows+'/3 ventanas',
-      confirmedWindows,changes,current};
-  }
-
-  return {eligible:true,reason:'Precio confirma '+confirmedWindows+'/3 ventanas',
-    confirmedWindows,changes,current,score:confirmedWindows*100};
+  return {eligible:true,side,reason:reference.reason||'Referencia confirmada',
+    confirmedWindows:confirmed,ratio,score:ratio*100+confirmed*10,raw:reference};
 }
 
 function intervalKey(market){
@@ -628,23 +710,23 @@ function openCandidates(markets){
 
   const candidates=markets.map(market=>{
     const strict=strictFlow(market);
-    const price=strict.eligible
-      ?priceConfirmation(market,strict.side)
-      :{eligible:false,reason:strict.reason,confirmedWindows:0,changes:{}};
-    return {market,strict,price};
+    const reference=strictReference(market);
+    return {market,strict,reference};
   })
     .filter(item=>{
       const market=item.market;
       const plan=market.paper_plan||{};
       const key=intervalKey(market);
       const spread=Number(market.yes_ask)-Number(market.yes_bid);
-      return item.strict.eligible&&item.price.eligible
+      return item.strict.eligible&&item.reference.eligible
+        &&item.strict.side===item.reference.side
         &&Number.isFinite(spread)&&spread<=MAX_SPREAD+0.000001
         &&plan.action&&plan.action!=='WAIT'
-        &&String(plan.side||'').toLowerCase()===item.strict.side
+        &&String(plan.side||'').toLowerCase()===item.reference.side
         &&!paper.seen.includes(market.ticker)&&key
         &&!paper.usedIntervals.includes(key)&&validEntryTime(market);
-    }).sort((a,b)=>(b.strict.score+b.price.score)-(a.strict.score+a.price.score));
+    }).sort((a,b)=>(b.strict.score+b.reference.score)
+      -(a.strict.score+a.reference.score));
 
   for(const item of candidates){
     if(paper.open.length>=MAX_OPEN||
@@ -664,11 +746,19 @@ function openCandidates(markets){
       averageDominance:roundNumber(item.strict.averageDominance,4),
       minimumContracts:roundNumber(item.strict.minimumContracts,2),
       confirmedFlowWindows:Number(item.strict.confirmedWindows),
-      confirmedPriceWindows:Number(item.price.confirmedWindows),
-      priceAtEntry:Number(item.price.current),
-      priceChanges:JSON.parse(JSON.stringify(item.price.changes||{})),
+      referenceCurrent:Number(item.reference.raw.current),
+      referenceTarget:Number(item.reference.raw.target),
+      referenceDistance:Number(item.reference.raw.distance),
+      referenceBuffer:Number(item.reference.raw.required_buffer),
+      referenceRatio:Number(item.reference.raw.distance_ratio),
+      referenceConfirmations:Number(item.reference.raw.confirmed_windows),
+      referenceAge:Number(item.reference.raw.latest_age_seconds),
+      referencePoints:Number(item.reference.raw.points),
+      referenceSource:String(item.reference.raw.source||''),
+      referenceWindows:JSON.parse(JSON.stringify(item.reference.raw.windows||{})),
+      secondsLeftAtEntry:roundNumber((Date.parse(market.close_time)-Date.now())/1000,2),
       spread:Number(plan.spread),
-      flowWindows:JSON.parse(JSON.stringify(market.paper_signal?.windows||{})),
+      flowWindows:JSON.parse(JSON.stringify(market.flow_signal?.windows||{})),
       openedAt:new Date().toISOString()});
     paper.seen.push(market.ticker);
     paper.usedIntervals.push(key);
@@ -693,14 +783,18 @@ function downloadPaperCsv(){
   const headers=['opened_at','closed_at','interval_close','series','ticker','side',
     'contracts','entry_price','exit_price','target_price','stop_price','entry_fee',
     'exit_fee','cost','pnl','reason','average_dominance','minimum_contracts',
-    'confirmed_flow_windows','confirmed_price_windows','contract_mid_at_entry','spread',
-    'p30_delta','p30_direction','p60_delta','p60_direction','p90_delta','p90_direction',
+    'confirmed_flow_windows','reference_current','reference_target','reference_distance',
+    'reference_buffer','reference_ratio','reference_confirmations','reference_age_seconds',
+    'reference_points','reference_source','seconds_left_at_entry','spread',
+    'r30_price','r30_side','r30_distance','r30_confirmed',
+    'r60_price','r60_side','r60_distance','r60_confirmed',
+    'r90_price','r90_side','r90_distance','r90_confirmed',
     'w30_trades','w30_dominance','w30_yes','w30_no','w60_trades','w60_dominance',
     'w60_yes','w60_no','w90_trades','w90_dominance','w90_yes','w90_no'];
   const rows=paper.closed.map(trade=>{
-    const p30=trade.priceChanges?.['30']||{};
-    const p60=trade.priceChanges?.['60']||{};
-    const p90=trade.priceChanges?.['90']||{};
+    const r30=trade.referenceWindows?.['30']||{};
+    const r60=trade.referenceWindows?.['60']||{};
+    const r90=trade.referenceWindows?.['90']||{};
     const w30=trade.flowWindows?.['30']||{};
     const w60=trade.flowWindows?.['60']||{};
     const w90=trade.flowWindows?.['90']||{};
@@ -708,8 +802,13 @@ function downloadPaperCsv(){
       trade.side,trade.contracts,trade.entryPrice,trade.exitPrice,trade.targetPrice,
       trade.stopPrice,trade.entryFee,trade.exitFee,trade.cost,trade.pnl,trade.reason,
       trade.averageDominance,trade.minimumContracts,trade.confirmedFlowWindows,
-      trade.confirmedPriceWindows,trade.priceAtEntry,trade.spread,p30.delta,p30.direction,
-      p60.delta,p60.direction,p90.delta,p90.direction,w30.trades,w30.dominance,
+      trade.referenceCurrent,trade.referenceTarget,trade.referenceDistance,
+      trade.referenceBuffer,trade.referenceRatio,trade.referenceConfirmations,
+      trade.referenceAge,trade.referencePoints,trade.referenceSource,
+      trade.secondsLeftAtEntry,trade.spread,
+      r30.price,r30.side,r30.distance,r30.confirmed,
+      r60.price,r60.side,r60.distance,r60.confirmed,
+      r90.price,r90.side,r90.distance,r90.confirmed,w30.trades,w30.dominance,
       w30.yes_contracts,w30.no_contracts,w60.trades,w60.dominance,
       w60.yes_contracts,w60.no_contracts,w90.trades,w90.dominance,
       w90.yes_contracts,w90.no_contracts];
@@ -719,7 +818,7 @@ function downloadPaperCsv(){
   const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
   const link=document.createElement('a');
   link.href=URL.createObjectURL(blob);
-  link.download='proyecto2_v4_resultados_'+new Date().toISOString().slice(0,10)+'.csv';
+  link.download='proyecto2_v5_resultados_'+new Date().toISOString().slice(0,10)+'.csv';
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -754,49 +853,61 @@ function renderPaper(){
     <td>${position.series.replace('KX','').replace('15M','')}</td>
     <td>${position.side.toUpperCase()}</td><td>$${position.entryPrice.toFixed(2)}</td>
     <td>$${position.targetPrice.toFixed(2)}</td><td>$${position.stopPrice.toFixed(2)}</td>
-    </tr>`).join('')||'<tr><td colspan="5">Ninguna</td></tr>';
+    <td>${referencePrice(position.referenceCurrent)} / ${referencePrice(position.referenceTarget)}</td>
+    </tr>`).join('')||'<tr><td colspan="6">Ninguna</td></tr>';
 
   document.getElementById('closed-rows').innerHTML=paper.closed.slice(-10).reverse()
     .map(trade=>`<tr><td>${trade.series.replace('KX','').replace('15M','')}</td>
     <td>${trade.side.toUpperCase()}</td><td>$${Number(trade.exitPrice).toFixed(2)}</td>
     <td class="${trade.pnl>=0?'positive':'negative'}">${money(trade.pnl)}</td>
+    <td>${Number.isFinite(Number(trade.referenceRatio))
+      ?Number(trade.referenceRatio).toFixed(2)+'x':'—'}</td>
     <td>${Number.isFinite(Number(trade.averageDominance))
       ?(Number(trade.averageDominance)*100).toFixed(1)+'%':'—'}</td>
     <td>${trade.reason}</td></tr>`).join('')
-    ||'<tr><td colspan="6">Todavía no hay resultados</td></tr>';
+    ||'<tr><td colspan="7">Todavía no hay resultados</td></tr>';
 }
 
 function renderMarkets(markets){
   document.getElementById('rows').innerHTML=markets.map(market=>{
     const strict=strictFlow(market);
-    const priceCheck=strict.eligible
-      ?priceConfirmation(market,strict.side)
-      :{eligible:false,reason:strict.reason};
+    const reference=strictReference(market);
     const plan=market.paper_plan||{};
     const spread=Number(market.yes_ask)-Number(market.yes_bid);
     const spreadOk=Number.isFinite(spread)&&spread<=MAX_SPREAD+0.000001;
-    const tradeable=strict.eligible&&priceCheck.eligible&&spreadOk
+    const sameSide=strict.side&&reference.side&&strict.side===reference.side;
+    const tradeable=strict.eligible&&reference.eligible&&sameSide&&spreadOk
       &&plan.action&&plan.action!=='WAIT';
-    const css=tradeable?(strict.side==='yes'?'yes':'no'):'wait';
-    const label=tradeable?'FUERTE '+strict.side.toUpperCase():'ESPERAR';
+    const css=tradeable?(reference.side==='yes'?'yes':'no'):'wait';
+    const label=tradeable?'FUERTE '+reference.side.toUpperCase():'ESPERAR';
     const planText=tradeable
       ?plan.contracts+' contratos · $'+Number(plan.cost).toFixed(2):'—';
-    let explanation=strict.reason;
-    if(strict.eligible&&!priceCheck.eligible){explanation=priceCheck.reason;}
-    else if(strict.eligible&&priceCheck.eligible&&!spreadOk){explanation='Spread mayor de 1¢';}
-    else if(strict.eligible&&priceCheck.eligible&&spreadOk&&!tradeable){
+    let explanation=reference.reason;
+    if(reference.eligible&&!strict.eligible){explanation=strict.reason;}
+    else if(reference.eligible&&strict.eligible&&!sameSide){
+      explanation='Referencia '+reference.side.toUpperCase()
+        +' / flujo '+strict.side.toUpperCase();
+    }else if(reference.eligible&&strict.eligible&&sameSide&&!spreadOk){
+      explanation='Spread mayor de 1¢';
+    }else if(reference.eligible&&strict.eligible&&sameSide&&spreadOk&&!tradeable){
       explanation=plan.reason||'Plan no disponible';
     }else if(tradeable){
       explanation=strict.confirmedWindows+'/3 flujo · '
-        +priceCheck.confirmedWindows+'/3 precio · dominio '
+        +reference.confirmedWindows+'/3 referencia · margen '
+        +reference.ratio.toFixed(2)+'x · dominio '
         +(strict.averageDominance*100).toFixed(1)+'%';
     }
     const name=market.series.replace('KX','').replace('15M','');
     const price=market.yes_ask==null?'—':'$'+Number(market.yes_ask).toFixed(2);
-    return `<tr><td>${name}</td><td>${price}</td><td><span class="pill ${css}"
-      title="${explanation||'Analizando'}">${label}</span></td>
+    const raw=reference.raw||{};
+    const referenceText=referencePrice(raw.current)+' / '+referencePrice(raw.target)
+      +(Number.isFinite(Number(raw.distance_ratio))
+        ?' · '+Number(raw.distance_ratio).toFixed(2)+'x':'');
+    const safeExplanation=String(explanation||'Analizando').replaceAll('"','&quot;');
+    return `<tr><td>${name}</td><td>${price}</td><td>${referenceText}</td>
+      <td><span class="pill ${css}" title="${safeExplanation}">${label}</span></td>
       <td>${planText}</td></tr>`;
-  }).join('')||'<tr><td colspan="4">No hay mercados abiertos ahora</td></tr>';
+  }).join('')||'<tr><td colspan="5">No hay mercados abiertos ahora</td></tr>';
 }
 
 async function refresh(){
@@ -811,14 +922,14 @@ async function refresh(){
     api.className='value '+(data.kalshi.connected?'safe':'warn');
 
     await updateOpenPositions(data.markets);
-    recordPriceHistory(data.markets);
     openCandidates(data.markets);
     if(paper.closed.length>=CHECKPOINT_GOAL){paper.active=false;}
     savePaper();
     renderMarkets(data.markets);
     renderPaper();
     document.getElementById('updated').textContent='Actualizado: '
-      +new Date(data.updated_at).toLocaleString()+' · costos incluyen tarifas';
+      +new Date(data.updated_at).toLocaleString()
+      +' · referencia real y costos con tarifas';
   }catch(error){
     document.getElementById('api').textContent='Sin conexión';
   }finally{refreshing=false;}
