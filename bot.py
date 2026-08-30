@@ -21,9 +21,9 @@ BASE_URL = (
 )
 
 FLOW_WINDOWS = (
+    30,
     60,
     90,
-    120,
 )
 
 # Estas reglas se revisaran despues
@@ -38,14 +38,14 @@ MIN_TRADES = int(
 MIN_CONTRACTS = float(
     os.getenv(
         "PAPER_MIN_CONTRACTS",
-        "20",
+        "50",
     )
 )
 
 MIN_DOMINANCE = float(
     os.getenv(
         "PAPER_MIN_DOMINANCE",
-        "0.65",
+        "0.75",
     )
 )
 
@@ -462,6 +462,19 @@ def build_paper_plan(
             ),
         }
 
+    spread = round(
+        yes_ask - yes_bid,
+        4,
+    )
+
+    if spread > 0.01:
+        return {
+            "action": "WAIT",
+            "reason": (
+                "Spread mayor de $0.01"
+            ),
+        }
+
     side = signal["side"]
 
     if side == "yes":
@@ -704,5 +717,6 @@ def build_paper_plan(
             stop_exit_fee
         ),
         "fees_included": True,
+        "spread": spread,
         "real_order": False,
     }

@@ -24,7 +24,7 @@ PRIVATE_KEY_PEM = os.getenv("KALSHI_PRIVATE_KEY", "").replace("\\n", "\n").strip
 SETTINGS = {
     "mode": "PAPER",
     "live_trading": False,
-    "test_version": 3,
+    "test_version": 4,
     "test_bankroll": 10.00,
     "max_cost_per_trade": 2.00,
     "profit_target": 0.20,
@@ -32,11 +32,14 @@ SETTINGS = {
     "max_open_trades": 1,
     "checkpoint_trades": 20,
     "final_test_goal": 100,
-    "required_confirmed_windows": 3,
+    "required_confirmed_windows": 2,
+    "required_price_windows": 2,
     "minimum_window_dominance": 0.75,
     "minimum_window_contracts": 50,
+    "maximum_spread": 0.01,
     "entry_window_seconds": [180, 360],
-    "flow_windows_seconds": [60, 90, 120],
+    "flow_windows_seconds": [30, 60, 90],
+    "price_windows_seconds": [30, 60, 90],
 }
 
 SERIES = [
@@ -228,7 +231,7 @@ def health():
         "ok": True,
         "project": "Proyecto 2",
         "mode": "PAPER",
-        "version": 3,
+        "version": 4,
     }
 
 
@@ -287,7 +290,7 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Proyecto 2 · Versión 3</title>
+  <title>Proyecto 2 · Versión 4</title>
   <style>
     :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#07111f;
     color:#eef4ff;font-family:system-ui,Arial}.wrap{max-width:1000px;margin:auto;padding:18px}
@@ -312,7 +315,7 @@ HTML = """
   </style>
 </head>
 <body><div class="wrap">
-  <h1>Proyecto 2 · Versión 3</h1>
+  <h1>Proyecto 2 · Versión 4</h1>
   <div class="tag">MODO PRUEBA · SIN ÓRDENES REALES</div>
 
   <div class="grid">
@@ -333,12 +336,15 @@ HTML = """
     <div class="card"><div class="label">Objetivo / stop</div>
       <div class="value">+$0.20 / −$0.10</div></div>
     <div class="card"><div class="label">Filtro de flujo</div>
-      <div class="value">3/3 · ≥75% · ≥50</div></div>
+      <div class="value">2/3 · ≥75% · ≥50</div></div>
+    <div class="card"><div class="label">Confirmación de precio</div>
+      <div class="value">2/3 · spread ≤1¢</div></div>
   </div>
 
   <div class="note"><strong>Simulación controlada.</strong> Las entradas, salidas,
   spread y tarifas se calculan con dinero ficticio. Esta versión elige una sola
-  criptomoneda por intervalo de 15 minutos y exige las tres ventanas de flujo.
+  criptomoneda por intervalo de 15 minutos y exige 2 de 3 ventanas de flujo,
+  además de 2 de 3 confirmaciones de movimiento del precio del contrato.
   Se pausará automáticamente al llegar a 20 pruebas para revisar el resultado.
   Para registrar pruebas, deja esta pestaña abierta y la computadora encendida.</div>
 
@@ -354,7 +360,7 @@ HTML = """
 
   <h2>Mercados cripto de 15 minutos</h2>
   <div class="table-wrap"><table>
-    <thead><tr><th>Serie</th><th>YES compra</th><th>Flujo</th><th>Plan simulado</th></tr></thead>
+    <thead><tr><th>Serie</th><th>YES compra</th><th>Señal</th><th>Plan simulado</th></tr></thead>
     <tbody id="rows"><tr><td colspan="4">Buscando mercados…</td></tr></tbody>
   </table></div>
 
@@ -374,17 +380,23 @@ HTML = """
 </div>
 
 <script>
-const PAPER_KEY='proyecto2_paper_v3';
+const PAPER_KEY='proyecto2_paper_v4';
 const START_BANKROLL=10.00;
 const MAX_OPEN=1;
 const CHECKPOINT_GOAL=20;
 const FINAL_TEST_GOAL=100;
-const REQUIRED_WINDOWS=['60','90','120'];
+const REQUIRED_WINDOWS=['30','60','90'];
+const REQUIRED_FLOW_CONFIRMATIONS=2;
 const MIN_WINDOW_TRADES=8;
 const MIN_WINDOW_CONTRACTS=50;
 const MIN_WINDOW_DOMINANCE=0.75;
+const PRICE_WINDOWS=[30,60,90];
+const REQUIRED_PRICE_CONFIRMATIONS=2;
+const MIN_PRICE_MOVE=0.01;
+const MAX_SPREAD=0.01;
 const ENTRY_MIN_SECONDS=180;
 const ENTRY_MAX_SECONDS=360;
+const priceHistory=new Map();
 let refreshing=false;
 
 function roundNumber(value,digits=4){
@@ -400,14 +412,14 @@ function money(value){
 }
 
 function newPaperState(){
-  return {version:3,active:false,cash:START_BANKROLL,open:[],closed:[],seen:[],
+  return {version:4,active:false,cash:START_BANKROLL,open:[],closed:[],seen:[],
     usedIntervals:[]};
 }
 
 function loadPaper(){
   try{
     const saved=JSON.parse(localStorage.getItem(PAPER_KEY));
-    if(!saved||saved.version!==3||!Array.isArray(saved.open)||
+    if(!saved||saved.version!==4||!Array.isArray(saved.open)||
        !Array.isArray(saved.closed)||!Array.isArray(saved.seen)||
        !Array.isArray(saved.usedIntervals)){return newPaperState();}
     return {...newPaperState(),...saved,cash:Number(saved.cash)};
@@ -508,30 +520,95 @@ function strictFlow(market){
     return {eligible:false,reason:'Falta una ventana de flujo'};
   }
 
-  for(const item of windows){
+  const confirmed=windows.filter(item=>{
     const window=item.value;
     const total=Number(window.yes_contracts||0)+Number(window.no_contracts||0);
-    if(!window.confirmed||String(window.side||'').toLowerCase()!==side){
-      return {eligible:false,reason:'Las 3 ventanas no coinciden'};
-    }
-    if(Number(window.trades||0)<MIN_WINDOW_TRADES){
-      return {eligible:false,reason:'Pocas operaciones en el flujo'};
-    }
-    if(total<MIN_WINDOW_CONTRACTS){
-      return {eligible:false,reason:'Menos de 50 contratos por ventana'};
-    }
-    if(Number(window.dominance||0)<MIN_WINDOW_DOMINANCE){
-      return {eligible:false,reason:'Dominio menor de 75%'};
-    }
+    return window.confirmed&&String(window.side||'').toLowerCase()===side
+      &&Number(window.trades||0)>=MIN_WINDOW_TRADES
+      &&total>=MIN_WINDOW_CONTRACTS
+      &&Number(window.dominance||0)>=MIN_WINDOW_DOMINANCE;
+  });
+
+  if(confirmed.length<REQUIRED_FLOW_CONFIRMATIONS){
+    return {eligible:false,reason:'Flujo confirmado en '+confirmed.length+'/3 ventanas'};
   }
 
-  const dominances=windows.map(item=>Number(item.value.dominance||0));
-  const totals=windows.map(item=>Number(item.value.yes_contracts||0)
+  const dominances=confirmed.map(item=>Number(item.value.dominance||0));
+  const totals=confirmed.map(item=>Number(item.value.yes_contracts||0)
     +Number(item.value.no_contracts||0));
   const averageDominance=dominances.reduce((sum,value)=>sum+value,0)/dominances.length;
   const minimumContracts=Math.min(...totals);
   return {eligible:true,side,averageDominance,minimumContracts,
+    confirmedWindows:confirmed.length,
     score:averageDominance*1000+Math.min(minimumContracts,999)/1000};
+}
+
+function marketMid(market){
+  const bid=Number(market.yes_bid);
+  const ask=Number(market.yes_ask);
+  if(!Number.isFinite(bid)||!Number.isFinite(ask)||bid<=0||ask>=1||bid>ask){
+    return null;
+  }
+  return roundNumber((bid+ask)/2,4);
+}
+
+function recordPriceHistory(markets){
+  const now=Date.now();
+  const oldest=now-105000;
+  for(const [ticker,history] of priceHistory.entries()){
+    const recent=history.filter(sample=>sample.ts>=oldest);
+    if(recent.length){priceHistory.set(ticker,recent);}
+    else{priceHistory.delete(ticker);}
+  }
+
+  for(const market of markets){
+    const mid=marketMid(market);
+    if(mid==null||!market.ticker){continue;}
+    const history=priceHistory.get(market.ticker)||[];
+    history.push({ts:now,mid});
+    priceHistory.set(market.ticker,history.filter(sample=>sample.ts>=oldest));
+  }
+}
+
+function nearestPriceSample(history,targetMs){
+  if(!history.length){return null;}
+  let best=null;
+  let distance=Infinity;
+  for(const sample of history){
+    const currentDistance=Math.abs(sample.ts-targetMs);
+    if(currentDistance<distance){best=sample;distance=currentDistance;}
+  }
+  return distance<=12000?best:null;
+}
+
+function priceConfirmation(market,side){
+  const current=marketMid(market);
+  const history=priceHistory.get(market.ticker)||[];
+  if(current==null){return {eligible:false,reason:'Precio del contrato no disponible'};}
+
+  const now=Date.now();
+  const changes={};
+  let confirmedWindows=0;
+
+  for(const seconds of PRICE_WINDOWS){
+    const sample=nearestPriceSample(history,now-seconds*1000);
+    if(!sample){
+      changes[String(seconds)]={delta:null,direction:null};
+      continue;
+    }
+    const delta=roundNumber(current-sample.mid,4);
+    const direction=delta>=MIN_PRICE_MOVE?'yes':delta<=-MIN_PRICE_MOVE?'no':null;
+    if(direction===side){confirmedWindows+=1;}
+    changes[String(seconds)]={delta,direction};
+  }
+
+  if(confirmedWindows<REQUIRED_PRICE_CONFIRMATIONS){
+    return {eligible:false,reason:'Precio confirma '+confirmedWindows+'/3 ventanas',
+      confirmedWindows,changes,current};
+  }
+
+  return {eligible:true,reason:'Precio confirma '+confirmedWindows+'/3 ventanas',
+    confirmedWindows,changes,current,score:confirmedWindows*100};
 }
 
 function intervalKey(market){
@@ -549,16 +626,25 @@ function validEntryTime(market){
 function openCandidates(markets){
   if(!paper.active||paper.closed.length+paper.open.length>=CHECKPOINT_GOAL){return;}
 
-  const candidates=markets.map(market=>({market,strict:strictFlow(market)}))
+  const candidates=markets.map(market=>{
+    const strict=strictFlow(market);
+    const price=strict.eligible
+      ?priceConfirmation(market,strict.side)
+      :{eligible:false,reason:strict.reason,confirmedWindows:0,changes:{}};
+    return {market,strict,price};
+  })
     .filter(item=>{
       const market=item.market;
       const plan=market.paper_plan||{};
       const key=intervalKey(market);
-      return item.strict.eligible&&plan.action&&plan.action!=='WAIT'
+      const spread=Number(market.yes_ask)-Number(market.yes_bid);
+      return item.strict.eligible&&item.price.eligible
+        &&Number.isFinite(spread)&&spread<=MAX_SPREAD+0.000001
+        &&plan.action&&plan.action!=='WAIT'
         &&String(plan.side||'').toLowerCase()===item.strict.side
         &&!paper.seen.includes(market.ticker)&&key
         &&!paper.usedIntervals.includes(key)&&validEntryTime(market);
-    }).sort((a,b)=>b.strict.score-a.strict.score);
+    }).sort((a,b)=>(b.strict.score+b.price.score)-(a.strict.score+a.price.score));
 
   for(const item of candidates){
     if(paper.open.length>=MAX_OPEN||
@@ -577,6 +663,11 @@ function openCandidates(markets){
       flowScore:roundNumber(item.strict.score,3),
       averageDominance:roundNumber(item.strict.averageDominance,4),
       minimumContracts:roundNumber(item.strict.minimumContracts,2),
+      confirmedFlowWindows:Number(item.strict.confirmedWindows),
+      confirmedPriceWindows:Number(item.price.confirmedWindows),
+      priceAtEntry:Number(item.price.current),
+      priceChanges:JSON.parse(JSON.stringify(item.price.changes||{})),
+      spread:Number(plan.spread),
       flowWindows:JSON.parse(JSON.stringify(market.paper_signal?.windows||{})),
       openedAt:new Date().toISOString()});
     paper.seen.push(market.ticker);
@@ -602,26 +693,33 @@ function downloadPaperCsv(){
   const headers=['opened_at','closed_at','interval_close','series','ticker','side',
     'contracts','entry_price','exit_price','target_price','stop_price','entry_fee',
     'exit_fee','cost','pnl','reason','average_dominance','minimum_contracts',
-    'w60_trades','w60_dominance','w60_yes','w60_no','w90_trades','w90_dominance',
-    'w90_yes','w90_no','w120_trades','w120_dominance','w120_yes','w120_no'];
+    'confirmed_flow_windows','confirmed_price_windows','contract_mid_at_entry','spread',
+    'p30_delta','p30_direction','p60_delta','p60_direction','p90_delta','p90_direction',
+    'w30_trades','w30_dominance','w30_yes','w30_no','w60_trades','w60_dominance',
+    'w60_yes','w60_no','w90_trades','w90_dominance','w90_yes','w90_no'];
   const rows=paper.closed.map(trade=>{
+    const p30=trade.priceChanges?.['30']||{};
+    const p60=trade.priceChanges?.['60']||{};
+    const p90=trade.priceChanges?.['90']||{};
+    const w30=trade.flowWindows?.['30']||{};
     const w60=trade.flowWindows?.['60']||{};
     const w90=trade.flowWindows?.['90']||{};
-    const w120=trade.flowWindows?.['120']||{};
     return [trade.openedAt,trade.closedAt,trade.closeTime,trade.series,trade.ticker,
       trade.side,trade.contracts,trade.entryPrice,trade.exitPrice,trade.targetPrice,
       trade.stopPrice,trade.entryFee,trade.exitFee,trade.cost,trade.pnl,trade.reason,
-      trade.averageDominance,trade.minimumContracts,w60.trades,w60.dominance,
+      trade.averageDominance,trade.minimumContracts,trade.confirmedFlowWindows,
+      trade.confirmedPriceWindows,trade.priceAtEntry,trade.spread,p30.delta,p30.direction,
+      p60.delta,p60.direction,p90.delta,p90.direction,w30.trades,w30.dominance,
+      w30.yes_contracts,w30.no_contracts,w60.trades,w60.dominance,
       w60.yes_contracts,w60.no_contracts,w90.trades,w90.dominance,
-      w90.yes_contracts,w90.no_contracts,w120.trades,w120.dominance,
-      w120.yes_contracts,w120.no_contracts];
+      w90.yes_contracts,w90.no_contracts];
   });
   const csv=[headers,...rows].map(row=>row.map(csvCell).join(','))
     .join(String.fromCharCode(13,10));
   const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
   const link=document.createElement('a');
   link.href=URL.createObjectURL(blob);
-  link.download='proyecto2_v3_resultados_'+new Date().toISOString().slice(0,10)+'.csv';
+  link.download='proyecto2_v4_resultados_'+new Date().toISOString().slice(0,10)+'.csv';
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -671,14 +769,28 @@ function renderPaper(){
 function renderMarkets(markets){
   document.getElementById('rows').innerHTML=markets.map(market=>{
     const strict=strictFlow(market);
-    const css=strict.eligible?(strict.side==='yes'?'yes':'no'):'wait';
-    const label=strict.eligible?'FUERTE '+strict.side.toUpperCase():'ESPERAR';
+    const priceCheck=strict.eligible
+      ?priceConfirmation(market,strict.side)
+      :{eligible:false,reason:strict.reason};
     const plan=market.paper_plan||{};
-    const planText=strict.eligible&&plan.action&&plan.action!=='WAIT'
+    const spread=Number(market.yes_ask)-Number(market.yes_bid);
+    const spreadOk=Number.isFinite(spread)&&spread<=MAX_SPREAD+0.000001;
+    const tradeable=strict.eligible&&priceCheck.eligible&&spreadOk
+      &&plan.action&&plan.action!=='WAIT';
+    const css=tradeable?(strict.side==='yes'?'yes':'no'):'wait';
+    const label=tradeable?'FUERTE '+strict.side.toUpperCase():'ESPERAR';
+    const planText=tradeable
       ?plan.contracts+' contratos · $'+Number(plan.cost).toFixed(2):'—';
-    const explanation=strict.eligible
-      ?'3/3 ventanas · dominio '+(strict.averageDominance*100).toFixed(1)+'%'
-      :strict.reason;
+    let explanation=strict.reason;
+    if(strict.eligible&&!priceCheck.eligible){explanation=priceCheck.reason;}
+    else if(strict.eligible&&priceCheck.eligible&&!spreadOk){explanation='Spread mayor de 1¢';}
+    else if(strict.eligible&&priceCheck.eligible&&spreadOk&&!tradeable){
+      explanation=plan.reason||'Plan no disponible';
+    }else if(tradeable){
+      explanation=strict.confirmedWindows+'/3 flujo · '
+        +priceCheck.confirmedWindows+'/3 precio · dominio '
+        +(strict.averageDominance*100).toFixed(1)+'%';
+    }
     const name=market.series.replace('KX','').replace('15M','');
     const price=market.yes_ask==null?'—':'$'+Number(market.yes_ask).toFixed(2);
     return `<tr><td>${name}</td><td>${price}</td><td><span class="pill ${css}"
@@ -699,6 +811,7 @@ async function refresh(){
     api.className='value '+(data.kalshi.connected?'safe':'warn');
 
     await updateOpenPositions(data.markets);
+    recordPriceHistory(data.markets);
     openCandidates(data.markets);
     if(paper.closed.length>=CHECKPOINT_GOAL){paper.active=false;}
     savePaper();
