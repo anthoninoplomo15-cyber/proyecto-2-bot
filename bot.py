@@ -1,9 +1,9 @@
-"""Motor matematico PAPER de Proyecto 2, version 9.
+"""Motor matematico PAPER de Proyecto 2, version 10 OMEGA Impulso.
 
-La estrategia compra el primer lado cuyo flujo ejecutado alcanza el limite de
-su criptomoneda durante los primeros cinco minutos de cada intervalo. Arriesga
-como maximo $1, incluyendo la tarifa de entrada, no usa stop loss y activa un
-trailing de 2 centavos cuando el valor de venta neto supera $1.10.
+La estrategia exige tres de cuatro confirmaciones: momentum, presion taker,
+libro de ordenes y flujo relativo de Kalshi. Arriesga como maximo $1,
+incluyendo la tarifa de entrada, no usa stop loss y activa un trailing de 2
+centavos cuando el valor de venta neto alcanza $1.05.
 
 Este modulo no contiene endpoints para crear, cancelar o modificar ordenes.
 """
@@ -13,28 +13,15 @@ import math
 
 FEE_RATE = 0.07
 MAX_TOTAL_COST = 1.00
-TRAIL_ARM_NET_PROCEEDS = 1.10
+TRAIL_ARM_NET_PROCEEDS = 1.05
 TRAIL_DROP = 0.02
 CONTRACT_STEP = 0.01
 PRICE_STEP = 0.01
-DEFAULT_FLOW_THRESHOLD = 1_000.00
-FLOW_THRESHOLDS = {
-    "KXBTC15M": 10_000.00,
-    "KXETH15M": 5_000.00,
-    "KXSOL15M": 2_000.00,
-    "KXXRP15M": 2_000.00,
-}
-# Se conserva este nombre para compatibilidad con cualquier importacion vieja.
-FLOW_THRESHOLD = DEFAULT_FLOW_THRESHOLD
-
-
-def flow_threshold_for_series(series_ticker):
-    """Limite de flujo para una serie o un ticker de mercado de Kalshi."""
-    normalized = str(series_ticker or "").strip().upper()
-    for series, threshold in FLOW_THRESHOLDS.items():
-        if normalized == series or normalized.startswith(series + "-"):
-            return threshold
-    return DEFAULT_FLOW_THRESHOLD
+MIN_CONFIRMING_VOTES = 3
+TAKER_BUY_THRESHOLD = 0.58
+ORDERBOOK_BID_THRESHOLD = 0.55
+KALSHI_YES_THRESHOLD = 0.60
+MAX_SPREAD = 0.05
 
 
 def _number(value):
@@ -43,6 +30,76 @@ def _number(value):
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _share_vote(value, yes_threshold):
+    share = _number(value)
+    if share is None or not 0 <= share <= 1:
+        return None
+    if share + 1e-12 >= yes_threshold:
+        return "yes"
+    if share <= 1 - yes_threshold + 1e-12:
+        return "no"
+    return None
+
+
+def omega_signal(
+    momentum_1m,
+    momentum_5m,
+    taker_buy_share,
+    orderbook_bid_share,
+    kalshi_yes_share,
+    spread,
+):
+    """Combina las cuatro confirmaciones de OMEGA sin colocar ordenes."""
+    one_minute = _number(momentum_1m)
+    five_minutes = _number(momentum_5m)
+    market_spread = _number(spread)
+
+    momentum_vote = None
+    if one_minute is not None and five_minutes is not None:
+        if one_minute > 0 and five_minutes > 0:
+            momentum_vote = "yes"
+        elif one_minute < 0 and five_minutes < 0:
+            momentum_vote = "no"
+
+    votes = {
+        "momentum": momentum_vote,
+        "taker_pressure": _share_vote(
+            taker_buy_share, TAKER_BUY_THRESHOLD
+        ),
+        "orderbook": _share_vote(
+            orderbook_bid_share, ORDERBOOK_BID_THRESHOLD
+        ),
+        "kalshi_flow": _share_vote(
+            kalshi_yes_share, KALSHI_YES_THRESHOLD
+        ),
+    }
+    yes_votes = sum(vote == "yes" for vote in votes.values())
+    no_votes = sum(vote == "no" for vote in votes.values())
+
+    side = None
+    reason = "OMEGA sin 3 confirmaciones"
+    if market_spread is None:
+        reason = "Spread ejecutable no disponible"
+    elif market_spread > MAX_SPREAD + 1e-12:
+        reason = f"Spread mayor de {MAX_SPREAD * 100:.0f} centavos"
+    elif yes_votes >= MIN_CONFIRMING_VOTES and yes_votes > no_votes:
+        side = "yes"
+        reason = f"OMEGA {yes_votes}/4 confirma UP"
+    elif no_votes >= MIN_CONFIRMING_VOTES and no_votes > yes_votes:
+        side = "no"
+        reason = f"OMEGA {no_votes}/4 confirma DOWN"
+
+    return {
+        "omega_side": side,
+        "omega_votes": max(yes_votes, no_votes),
+        "omega_yes_votes": yes_votes,
+        "omega_no_votes": no_votes,
+        "omega_vote_details": votes,
+        "omega_reason": reason,
+        "spread": None if market_spread is None else round(market_spread, 4),
+    }
 
 
 def taker_fee(contracts, price):
@@ -141,18 +198,18 @@ def build_entry_plan(
     max_total=MAX_TOTAL_COST,
     arm_net_proceeds=TRAIL_ARM_NET_PROCEEDS,
     trail_drop=TRAIL_DROP,
-    flow_threshold=FLOW_THRESHOLD,
+    omega_votes=None,
 ):
-    """Crea un plan PAPER para el primer lado que cruza el flujo requerido."""
+    """Crea un plan PAPER despues de una confirmacion OMEGA valida."""
     normalized_side = str(side or "").lower()
     price = _number(entry_price)
-    threshold = _number(flow_threshold)
+    vote_count = _number(omega_votes)
     if normalized_side not in {"yes", "no"}:
         return {"action": "WAIT", "reason": "Lado invalido"}
     if price is None or not 0 < price < 1:
         return {"action": "WAIT", "reason": "Ask ejecutable no disponible"}
-    if threshold is None or threshold <= 0:
-        threshold = DEFAULT_FLOW_THRESHOLD
+    if vote_count is None or vote_count < MIN_CONFIRMING_VOTES:
+        return {"action": "WAIT", "reason": "OMEGA sin 3 confirmaciones"}
 
     quantity = affordable_contracts(price, max_total=max_total)
     if quantity is None:
@@ -170,9 +227,12 @@ def build_entry_plan(
         "cost": cost,
         "trail_arm_net_proceeds": round(float(arm_net_proceeds), 4),
         "trail_drop": round(float(trail_drop), 4),
-        "flow_threshold": round(threshold, 2),
+        "omega_votes": int(vote_count),
         "estimated_arm_price": arm_price,
         "stop_loss": None,
         "hold_if_never_armed": True,
-        "reason": f"Primer lado en alcanzar ${threshold:,.0f} de flujo ejecutado",
+        "reason": (
+            f"OMEGA {int(vote_count)}/4 confirma "
+            + ("UP" if normalized_side == "yes" else "DOWN")
+        ),
     }

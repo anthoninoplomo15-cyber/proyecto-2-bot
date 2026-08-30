@@ -12,10 +12,13 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from flask import Flask, jsonify, render_template_string
 
 from bot import (
-    DEFAULT_FLOW_THRESHOLD,
-    FLOW_THRESHOLDS,
+    KALSHI_YES_THRESHOLD,
+    MAX_SPREAD,
+    MIN_CONFIRMING_VOTES,
+    ORDERBOOK_BID_THRESHOLD,
+    TAKER_BUY_THRESHOLD,
     build_entry_plan,
-    flow_threshold_for_series,
+    omega_signal,
 )
 
 
@@ -30,14 +33,17 @@ PRIVATE_KEY_PEM = os.getenv("KALSHI_PRIVATE_KEY", "").replace("\\n", "\n").strip
 SETTINGS = {
     "mode": "PAPER",
     "live_trading": False,
-    "test_version": 9,
+    "test_version": 10,
     "test_bankroll": 14.00,
     "max_total_cost_per_crypto": 1.00,
-    "entry_mode": "first_taker_outcome_flow_to_crypto_threshold",
-    "default_flow_threshold_dollars": DEFAULT_FLOW_THRESHOLD,
-    "flow_threshold_dollars_by_series": FLOW_THRESHOLDS,
+    "entry_mode": "omega_impulse_three_of_four",
+    "minimum_confirming_votes": MIN_CONFIRMING_VOTES,
+    "taker_buy_threshold": TAKER_BUY_THRESHOLD,
+    "orderbook_bid_threshold": ORDERBOOK_BID_THRESHOLD,
+    "kalshi_yes_threshold": KALSHI_YES_THRESHOLD,
+    "maximum_spread": MAX_SPREAD,
     "flow_measure": "executed_taker_outcome_notional",
-    "trail_arm_net_proceeds": 1.10,
+    "trail_arm_net_proceeds": 1.05,
     "trail_drop": 0.02,
     "stop_loss": None,
     "hold_to_settlement_if_never_armed": True,
@@ -45,10 +51,15 @@ SETTINGS = {
     "continuous_operation": True,
     "intervals_per_day": 96,
     "maximum_daily_opportunities": 1344,
-    "entry_window_seconds_remaining": [600, 905],
+    "entry_window_seconds_remaining": [840, 905],
     "poll_seconds": 3,
 }
 
+# Endpoint oficial exclusivo para datos publicos de mercado. Evita depender de
+# funciones de cuenta y es mas apropiado para un servicio PAPER en la nube.
+BINANCE_BASE_URL = "https://data-api.binance.vision"
+BINANCE_FUTURES_BASE_URL = "https://fapi.binance.com"
+BINANCE_CACHE_SECONDS = 10
 INTERVAL_SECONDS = 15 * 60
 FLOW_WINDOW_SECONDS = 5 * 60
 
@@ -59,7 +70,26 @@ SERIES = [
     "KXHYPE15M", "KXSUI15M",
 ]
 
+BINANCE_SYMBOLS = {
+    "KXBTC15M": "BTCUSDT",
+    "KXETH15M": "ETHUSDT",
+    "KXSOL15M": "SOLUSDT",
+    "KXXRP15M": "XRPUSDT",
+    "KXDOGE15M": "DOGEUSDT",
+    "KXBNB15M": "BNBUSDT",
+    "KXADA15M": "ADAUSDT",
+    "KXLINK15M": "LINKUSDT",
+    "KXAVAX15M": "AVAXUSDT",
+    "KXLTC15M": "LTCUSDT",
+    "KXBCH15M": "BCHUSDT",
+    "KXDOT15M": "DOTUSDT",
+    "KXHYPE15M": "HYPEUSDT",
+    "KXSUI15M": "SUIUSDT",
+}
+BINANCE_FUTURES_SERIES = {"KXHYPE15M"}
+
 CONNECTION_CACHE = {"updated": 0.0, "value": None}
+BINANCE_CACHE = {}
 
 
 def load_private_key():
@@ -140,6 +170,101 @@ def opposite_price(price):
     return round(1 - float(price), 4)
 
 
+def empty_binance_signal(series_ticker, message="Datos Binance no disponibles"):
+    return {
+        "binance_available": False,
+        "binance_symbol": BINANCE_SYMBOLS.get(series_ticker),
+        "binance_market": (
+            "futures" if series_ticker in BINANCE_FUTURES_SERIES else "spot"
+        ),
+        "binance_price": None,
+        "momentum_1m_pct": None,
+        "momentum_5m_pct": None,
+        "taker_buy_share": None,
+        "orderbook_bid_share": None,
+        "binance_message": message,
+    }
+
+
+def fetch_binance_signal(series_ticker):
+    """Obtiene momentum, presion taker y libro con una cache corta."""
+    symbol = BINANCE_SYMBOLS.get(series_ticker)
+    if not symbol:
+        return empty_binance_signal(series_ticker, "Par Binance no configurado")
+
+    futures_market = series_ticker in BINANCE_FUTURES_SERIES
+    market_name = "futures" if futures_market else "spot"
+    base_url = BINANCE_FUTURES_BASE_URL if futures_market else BINANCE_BASE_URL
+    klines_path = "/fapi/v1/klines" if futures_market else "/api/v3/klines"
+    depth_path = "/fapi/v1/depth" if futures_market else "/api/v3/depth"
+    cache_key = market_name + ":" + symbol
+
+    now = time.monotonic()
+    cached = BINANCE_CACHE.get(cache_key)
+    if cached and now - cached["updated"] < BINANCE_CACHE_SECONDS:
+        return dict(cached["value"])
+
+    try:
+        klines_response = requests.get(
+            base_url + klines_path,
+            params={"symbol": symbol, "interval": "1m", "limit": 7},
+            timeout=7,
+        )
+        klines_response.raise_for_status()
+        klines = klines_response.json()
+        if not isinstance(klines, list) or len(klines) < 7:
+            raise ValueError("Velas Binance incompletas")
+
+        depth_response = requests.get(
+            base_url + depth_path,
+            params={"symbol": symbol, "limit": 20},
+            timeout=7,
+        )
+        depth_response.raise_for_status()
+        depth = depth_response.json()
+
+        closes = [float(candle[4]) for candle in klines]
+        current_price = closes[-1]
+        momentum_1m = current_price / closes[-2] - 1
+        momentum_5m = current_price / closes[-6] - 1
+
+        recent_klines = klines[-2:]
+        quote_volume = sum(float(candle[7]) for candle in recent_klines)
+        taker_buy_quote = sum(float(candle[10]) for candle in recent_klines)
+        taker_buy_share = (
+            taker_buy_quote / quote_volume if quote_volume > 0 else None
+        )
+
+        bids = depth.get("bids", [])[:10]
+        asks = depth.get("asks", [])[:10]
+        bid_notional = sum(float(price) * float(size) for price, size in bids)
+        ask_notional = sum(float(price) * float(size) for price, size in asks)
+        book_total = bid_notional + ask_notional
+        orderbook_bid_share = (
+            bid_notional / book_total if book_total > 0 else None
+        )
+
+        if taker_buy_share is None or orderbook_bid_share is None:
+            raise ValueError("Volumen Binance incompleto")
+
+        value = {
+            "binance_available": True,
+            "binance_symbol": symbol,
+            "binance_market": market_name,
+            "binance_price": round(current_price, 8),
+            "momentum_1m_pct": round(momentum_1m * 100, 5),
+            "momentum_5m_pct": round(momentum_5m * 100, 5),
+            "taker_buy_share": round(taker_buy_share, 6),
+            "orderbook_bid_share": round(orderbook_bid_share, 6),
+            "binance_message": "Señal Binance disponible",
+        }
+    except (requests.exceptions.RequestException, TypeError, ValueError, ZeroDivisionError):
+        value = empty_binance_signal(series_ticker)
+
+    BINANCE_CACHE[cache_key] = {"updated": now, "value": dict(value)}
+    return value
+
+
 def parse_trade_time(trade):
     """Devuelve la hora Unix mas precisa disponible para ordenar ejecuciones."""
     value = trade.get("ts_ms")
@@ -183,45 +308,31 @@ def interval_times(close_time):
     return start_ts, start_ts + FLOW_WINDOW_SECONDS
 
 
-def empty_flow(
-    available,
-    window_closed=False,
-    flow_threshold=DEFAULT_FLOW_THRESHOLD,
-):
+def empty_flow(available, window_closed=False):
     starting_value = 0.0 if available and not window_closed else None
     return {
         "flow_available": available,
         "flow_window_closed": window_closed,
         "yes_flow": starting_value,
         "no_flow": starting_value,
-        "flow_first_side": None,
-        "flow_crossed_at": None,
         "flow_trade_count": 0,
-        "flow_threshold": round(float(flow_threshold), 2),
+        "kalshi_yes_share": None,
     }
 
 
-def fetch_trade_flow(
-    ticker,
-    close_time,
-    flow_threshold=DEFAULT_FLOW_THRESHOLD,
-):
+def fetch_trade_flow(ticker, close_time):
     """Suma el dinero ejecutado por el taker de cada lado en los primeros 5 min."""
     window = interval_times(close_time)
     if not ticker or window is None:
-        return empty_flow(False, flow_threshold=flow_threshold)
+        return empty_flow(False)
 
     start_ts, deadline_ts = window
     now_ts = dt.datetime.now(dt.timezone.utc).timestamp()
     if now_ts < start_ts:
-        return empty_flow(True, flow_threshold=flow_threshold)
+        return empty_flow(True)
     if now_ts >= deadline_ts:
         # La ventana ya cerro. Nunca se abre una entrada nueva despues de 5 min.
-        return empty_flow(
-            True,
-            window_closed=True,
-            flow_threshold=flow_threshold,
-        )
+        return empty_flow(True, window_closed=True)
 
     trades = []
     cursor = None
@@ -283,30 +394,24 @@ def fetch_trade_flow(
         )
 
     totals = {"yes": 0.0, "no": 0.0}
-    first_side = None
-    crossed_at = None
-    for executed_at, _trade_id, side, amount in sorted(normalized):
+    for _executed_at, _trade_id, side, amount in normalized:
         totals[side] += amount
-        if first_side is None and totals[side] + 1e-9 >= flow_threshold:
-            first_side = side
-            crossed_at = dt.datetime.fromtimestamp(
-                executed_at, tz=dt.timezone.utc
-            ).isoformat()
+    total_flow = totals["yes"] + totals["no"]
+    yes_share = totals["yes"] / total_flow if total_flow > 0 else None
 
     return {
         "flow_available": True,
         "flow_window_closed": False,
         "yes_flow": round(totals["yes"], 2),
         "no_flow": round(totals["no"], 2),
-        "flow_first_side": first_side,
-        "flow_crossed_at": crossed_at,
         "flow_trade_count": len(normalized),
-        "flow_threshold": round(float(flow_threshold), 2),
+        "kalshi_yes_share": (
+            None if yes_share is None else round(yes_share, 6)
+        ),
     }
 
 
 def scan_one_series(series_ticker):
-    flow_threshold = flow_threshold_for_series(series_ticker)
     response = requests.get(
         BASE_URL + "/markets",
         params={"series_ticker": series_ticker, "status": "open", "limit": 5},
@@ -333,14 +438,12 @@ def scan_one_series(series_ticker):
                 fetch_trade_flow(
                     market.get("ticker"),
                     market.get("close_time"),
-                    flow_threshold=flow_threshold,
                 )
             )
         except (requests.exceptions.RequestException, TypeError, ValueError):
             # Falla cerrada: sin flujo verificable no existe entrada.
-            market.update(
-                empty_flow(False, flow_threshold=flow_threshold)
-            )
+            market.update(empty_flow(False))
+        market.update(fetch_binance_signal(series_ticker))
     return selected
 
 
@@ -367,19 +470,28 @@ def add_strategy_plans(markets):
         no_ask = opposite_price(yes_bid)
         item["no_bid"] = no_bid
         item["no_ask"] = no_ask
-        flow_threshold = item.get(
-            "flow_threshold", DEFAULT_FLOW_THRESHOLD
+        spread = None
+        if yes_bid is not None and yes_ask is not None:
+            spread = max(0.0, round(float(yes_ask) - float(yes_bid), 4))
+        signal = omega_signal(
+            item.get("momentum_1m_pct"),
+            item.get("momentum_5m_pct"),
+            item.get("taker_buy_share"),
+            item.get("orderbook_bid_share"),
+            item.get("kalshi_yes_share"),
+            spread,
         )
+        item.update(signal)
         item["yes_plan"] = build_entry_plan(
-            "yes", yes_ask, flow_threshold=flow_threshold
+            "yes", yes_ask, omega_votes=signal["omega_yes_votes"]
         )
         item["no_plan"] = build_entry_plan(
-            "no", no_ask, flow_threshold=flow_threshold
+            "no", no_ask, omega_votes=signal["omega_no_votes"]
         )
-        first_side = item.get("flow_first_side")
+        omega_side = signal["omega_side"]
         item["selected_plan"] = (
-            item["yes_plan"] if first_side == "yes"
-            else item["no_plan"] if first_side == "no"
+            item["yes_plan"] if omega_side == "yes"
+            else item["no_plan"] if omega_side == "no"
             else None
         )
         enriched.append(item)
@@ -392,7 +504,7 @@ def health():
         "ok": True,
         "project": "Proyecto 2",
         "mode": "PAPER",
-        "version": 9,
+        "version": 10,
         "live_trading": False,
     }
 
@@ -449,10 +561,10 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Proyecto 2 · Versión 9</title>
+  <title>Proyecto 2 · Versión 10 OMEGA</title>
   <style>
     :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#07111f;
-    color:#eef4ff;font-family:system-ui,Arial}.wrap{max-width:1080px;margin:auto;padding:18px}
+    color:#eef4ff;font-family:system-ui,Arial}.wrap{max-width:1400px;margin:auto;padding:18px}
     h1{margin:0 0 4px}h2{margin-top:24px}.tag{display:inline-block;background:#1f6b3d;
     padding:6px 10px;border-radius:999px;font-weight:800}.grid{display:grid;
     grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:16px 0}
@@ -474,8 +586,8 @@ HTML = """
   </style>
 </head>
 <body><div class="wrap">
-  <h1>Proyecto 2 · Versión 9</h1>
-  <div class="tag">MODO PRUEBA · LÍMITE DE FLUJO SEGÚN CRIPTO</div>
+  <h1>Proyecto 2 · Versión 10 OMEGA Impulso</h1>
+  <div class="tag">MODO PRUEBA · 14 CRIPTOS · 3 DE 4 SEÑALES</div>
 
   <div class="grid">
     <div class="card"><div class="label">Kalshi API</div>
@@ -495,37 +607,37 @@ HTML = """
     <div class="card"><div class="label">Operaciones positivas</div>
       <div id="paper-wins" class="value">0 / 0 · 0%</div></div>
     <div class="card"><div class="label">Entrada</div>
-      <div class="value">Primer lado en su límite</div></div>
+      <div class="value">OMEGA 3 de 4</div></div>
     <div class="card"><div class="label">Máximo por cripto</div>
       <div class="value">$1 con fee</div></div>
     <div class="card"><div class="label">Activar seguimiento</div>
-      <div class="value">$1.10 netos</div></div>
+      <div class="value">$1.05 netos</div></div>
     <div class="card"><div class="label">Retroceso permitido</div>
       <div class="value">2¢ desde el máximo</div></div>
     <div class="card"><div class="label">Stop loss</div>
       <div class="value negative">Ninguno</div></div>
     <div class="card"><div class="label">Ventana de entrada</div>
-      <div class="value">Primeros 5 min</div></div>
+      <div class="value">Primer minuto</div></div>
   </div>
 
-  <div class="note"><strong>Regla automática de esta prueba.</strong> Al comenzar
-  cada contrato de 15 minutos, pone en cero el flujo de UP y DOWN. Suma por
-  separado el dinero de las operaciones ejecutadas según el lado del <em>taker</em>
-  y compra el primer lado que alcance el límite de su cripto durante los primeros
-  5 minutos: BTC $10,000; ETH $5,000; SOL y XRP $2,000; las demás $1,000. Si
-  ninguno alcanza su límite, no abre una posición en ese intervalo. Usa hasta
-  $1 por criptomoneda, incluyendo la tarifa.
+  <div class="note"><strong>Regla automática de esta prueba.</strong> Durante el
+  primer minuto de cada contrato, OMEGA revisa cuatro señales para cada cripto:
+  momentum de 1 y 5 minutos en la misma dirección; presión de compras o ventas
+  taker de al menos 58%; libro de órdenes inclinado al menos 55%; y flujo de
+  Kalshi inclinado al menos 60%. Compra UP o DOWN solo cuando 3 de las 4 señales
+  coinciden y el spread ejecutable no supera 5¢. Si no coinciden, no entra. Usa
+  hasta $1 por criptomoneda, incluyendo la tarifa.
   No vende antes de que el valor recibido al <em>bid</em>, después de la tarifa de
-  salida, llegue a $1.10. Desde ese momento sigue el valor neto más alto y vende
-  cuando retrocede 2¢. Si nunca llega a $1.10, conserva la posición hasta el
+  salida, llegue a $1.05. Desde ese momento sigue el valor neto más alto y vende
+  cuando retrocede 2¢. Si nunca llega a $1.05, conserva la posición hasta el
   resultado. Solo usa una vez cada cripto por intervalo y vigila las 14
   criptomonedas durante los 96 intervalos del día.</div>
 
   <div class="note risk"><strong>Riesgo importante.</strong> No tener stop loss
   permite perder casi todo el dólar. El seguimiento de 2¢ no protege la posición
-  antes de llegar a $1.10 netos y una caída rápida puede simular una salida por
-  debajo del nivel esperado. Alcanzar el límite de flujo tampoco garantiza el
-  resultado. Esta prueba mide la idea; no demuestra que sea
+  antes de llegar a $1.05 netos y una caída rápida puede simular una salida por
+  debajo del nivel esperado. Una señal OMEGA 3/4 tampoco garantiza el resultado.
+  Esta prueba mide por separado el impulso y el cierre; no demuestra que sea
   rentable ni coloca dinero real. Mantén esta pestaña abierta para que registre.</div>
 
   <div class="controls">
@@ -540,8 +652,8 @@ HTML = """
 
   <h2>Mercados cripto de 15 minutos</h2>
   <div class="table-wrap"><table>
-    <thead><tr><th>Cripto</th><th>UP compra</th><th>DOWN compra</th><th>Flujo UP</th><th>Flujo DOWN</th><th>Tiempo</th><th>Estado</th><th>Plan</th></tr></thead>
-    <tbody id="rows"><tr><td colspan="8">Buscando mercados…</td></tr></tbody>
+    <thead><tr><th>Cripto</th><th>UP</th><th>DOWN</th><th>Momentum</th><th>Presión</th><th>Libro</th><th>Kalshi</th><th>Votos</th><th>Tiempo</th><th>Estado</th><th>Plan</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="11">Buscando mercados…</td></tr></tbody>
   </table></div>
 
   <h2>Operaciones simuladas abiertas</h2>
@@ -560,12 +672,12 @@ HTML = """
 </div>
 
 <script>
-const PAPER_KEY='proyecto2_paper_v9_flow10k_trailing_all_intervals';
+const PAPER_KEY='proyecto2_paper_v10_omega_impulso_all';
 const START_BANKROLL=14.00;
 const MAX_OPEN=14;
-const TRAIL_ARM_NET_PROCEEDS=1.10;
+const TRAIL_ARM_NET_PROCEEDS=1.05;
 const TRAIL_DROP=0.02;
-const ENTRY_MIN_SECONDS=600;
+const ENTRY_MIN_SECONDS=840;
 const ENTRY_MAX_SECONDS=905;
 let refreshing=false;
 
@@ -600,7 +712,31 @@ function priceText(value){
   return Number.isFinite(number)?Math.round(number*100)+'¢':'—';
 }
 
-function sideText(side){return side==='yes'?'UP':'DOWN';}
+function percentText(value){
+  if(value==null||value===''){return '—';}
+  const number=Number(value);
+  return Number.isFinite(number)?(number*100).toFixed(0)+'%':'—';
+}
+
+function momentumText(oneMinute,fiveMinutes){
+  const one=Number(oneMinute);
+  const five=Number(fiveMinutes);
+  if(!Number.isFinite(one)||!Number.isFinite(five)){return '—';}
+  const signed=value=>(value>0?'+':'')+value.toFixed(3)+'%';
+  return signed(one)+' / '+signed(five);
+}
+
+function directionalShare(value,yesLabel,noLabel){
+  const share=Number(value);
+  if(!Number.isFinite(share)){return '—';}
+  return share>=0.5
+    ?yesLabel+' '+percentText(share)
+    :noLabel+' '+percentText(1-share);
+}
+
+function sideText(side){
+  return side==='yes'?'UP':side==='no'?'DOWN':'—';
+}
 
 function cryptoName(series){
   return String(series||'').replace('KX','').replace('15M','');
@@ -625,13 +761,13 @@ function validEntryTime(market){
 }
 
 function newPaperState(){
-  return {version:'9-flow10k-trailing-all',active:false,cash:START_BANKROLL,open:[],closed:[],seen:[]};
+  return {version:'10-omega-impulso-all',active:false,cash:START_BANKROLL,open:[],closed:[],seen:[]};
 }
 
 function loadPaper(){
   try{
     const saved=JSON.parse(localStorage.getItem(PAPER_KEY));
-    if(!saved||saved.version!=='9-flow10k-trailing-all'||!Array.isArray(saved.open)
+    if(!saved||saved.version!=='10-omega-impulso-all'||!Array.isArray(saved.open)
       ||!Array.isArray(saved.closed)||!Array.isArray(saved.seen)){
       return newPaperState();
     }
@@ -727,7 +863,7 @@ async function updateOpenPositions(markets){
     if(trailArmed&&result.proceeds<=peakNetProceeds-TRAIL_DROP+1e-9){
       closeAtPrice(position,price,'RETROCESO DE 2¢ DESDE EL MÁXIMO');
     }else{
-      // Antes de $1.10 no existe salida. Despues, solo sale al retroceder 2 centavos.
+      // Antes de $1.05 no existe salida. Despues, solo sale al retroceder 2 centavos.
       remaining.push(position);
     }
   }
@@ -735,8 +871,8 @@ async function updateOpenPositions(markets){
   paper.open=remaining;
 }
 
-function flowPlan(market){
-  if(!market.flow_available||!['yes','no'].includes(market.flow_first_side)){
+function omegaPlan(market){
+  if(!market.binance_available||!['yes','no'].includes(market.omega_side)){
     return null;
   }
   const plan=market.selected_plan;
@@ -748,11 +884,11 @@ function openCandidates(markets){
 
   const candidates=markets
     .filter(market=>market.ticker&&!paper.seen.includes(market.ticker)
-      &&validEntryTime(market)&&flowPlan(market))
+      &&validEntryTime(market)&&omegaPlan(market))
     .sort((a,b)=>secondsLeft(b)-secondsLeft(a));
 
   for(const market of candidates){
-    const plan=flowPlan(market);
+    const plan=omegaPlan(market);
     if(!plan||paper.open.length>=MAX_OPEN){continue;}
 
     if(Number(plan.cost)>paper.cash+1e-9){continue;}
@@ -780,10 +916,21 @@ function openCandidates(markets){
       entryNoAsk:Number(market.no_ask),
       entryYesFlow:Number(market.yes_flow),
       entryNoFlow:Number(market.no_flow),
-      flowThreshold:Number(market.flow_threshold),
-      flowFirstSide:String(market.flow_first_side),
-      flowCrossedAt:market.flow_crossed_at,
       flowTradeCount:Number(market.flow_trade_count),
+      kalshiYesShare:market.kalshi_yes_share==null?null:Number(market.kalshi_yes_share),
+      binanceSymbol:market.binance_symbol,
+      binanceMarket:market.binance_market,
+      binancePrice:market.binance_price==null?null:Number(market.binance_price),
+      momentum1mPct:Number(market.momentum_1m_pct),
+      momentum5mPct:Number(market.momentum_5m_pct),
+      takerBuyShare:Number(market.taker_buy_share),
+      orderbookBidShare:Number(market.orderbook_bid_share),
+      omegaSide:String(market.omega_side),
+      omegaVotes:Number(market.omega_votes),
+      omegaYesVotes:Number(market.omega_yes_votes),
+      omegaNoVotes:Number(market.omega_no_votes),
+      omegaVoteDetails:market.omega_vote_details,
+      spread:Number(market.spread),
       lastExitPrice:null,
       lastPnl:null,
       lastNetProceeds:null,
@@ -813,16 +960,21 @@ function downloadPaperCsv(){
     'contracts','entry_price','exit_price','entry_fee','exit_fee','total_entry_cost',
     'net_proceeds_at_exit','pnl_net','reason','trail_arm_net_proceeds','trail_drop','estimated_arm_price',
     'seconds_left_at_entry','entry_yes_bid','entry_yes_ask','entry_no_bid','entry_no_ask',
-    'entry_yes_flow','entry_no_flow','flow_threshold','flow_first_side','flow_crossed_at','flow_trade_count',
-    'trail_armed','peak_net_proceeds','peak_pnl','lowest_pnl'];
+    'entry_yes_flow','entry_no_flow','flow_trade_count','kalshi_yes_share',
+    'binance_symbol','binance_market','binance_price','momentum_1m_pct','momentum_5m_pct',
+    'taker_buy_share','orderbook_bid_share','omega_side','omega_votes',
+    'omega_yes_votes','omega_no_votes','spread','trail_armed',
+    'peak_net_proceeds','peak_pnl','lowest_pnl'];
   const rows=paper.closed.map(trade=>[
     trade.openedAt,trade.closedAt,trade.closeTime,trade.series,trade.ticker,trade.side,
     trade.contracts,trade.entryPrice,trade.exitPrice,trade.entryFee,trade.exitFee,
     trade.cost,trade.netProceeds,trade.pnl,trade.reason,trade.trailArmNetProceeds,trade.trailDrop,
     trade.estimatedArmPrice,trade.secondsLeftAtEntry,trade.entryYesBid,
     trade.entryYesAsk,trade.entryNoBid,trade.entryNoAsk,trade.entryYesFlow,
-    trade.entryNoFlow,trade.flowThreshold,trade.flowFirstSide,trade.flowCrossedAt,
-    trade.flowTradeCount,trade.trailArmed,
+    trade.entryNoFlow,trade.flowTradeCount,trade.kalshiYesShare,
+    trade.binanceSymbol,trade.binanceMarket,trade.binancePrice,trade.momentum1mPct,trade.momentum5mPct,
+    trade.takerBuyShare,trade.orderbookBidShare,trade.omegaSide,trade.omegaVotes,
+    trade.omegaYesVotes,trade.omegaNoVotes,trade.spread,trade.trailArmed,
     trade.peakNetProceeds,trade.peakPnl,trade.lowestPnl,
   ]);
   const csv=[headers,...rows].map(row=>row.map(csvCell).join(','))
@@ -830,7 +982,7 @@ function downloadPaperCsv(){
   const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
   const link=document.createElement('a');
   link.href=URL.createObjectURL(blob);
-  link.download='proyecto2_v9_flow10k_trailing_2c_'+new Date().toISOString().slice(0,10)+'.csv';
+  link.download='proyecto2_v10_omega_impulso_'+new Date().toISOString().slice(0,10)+'.csv';
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -867,7 +1019,7 @@ function renderPaper(){
     <td>${priceText(position.entryPrice)}</td><td>${priceText(position.lastExitPrice)}</td>
     <td>${dollarsText(position.lastNetProceeds)}</td>
     <td class="${Number(position.lastPnl)>=0?'positive':'negative'}">${position.lastPnl==null?'—':money(position.lastPnl)}</td>
-    <td>${position.trailArmed?'ACTIVO · máx. '+dollarsText(position.peakNetProceeds):'Esperando $1.10'}</td>
+    <td>${position.trailArmed?'ACTIVO · máx. '+dollarsText(position.peakNetProceeds):'Esperando $1.05'}</td>
     <td>${countdown((Date.parse(position.closeTime)-Date.now())/1000)}</td></tr>`).join('')
     ||'<tr><td colspan="8">Ninguna</td></tr>';
 
@@ -882,12 +1034,14 @@ function renderPaper(){
 function renderMarkets(markets){
   document.getElementById('rows').innerHTML=markets.map(market=>{
     const remaining=secondsLeft(market);
-    const thresholdText=flowText(market.flow_threshold);
-    const plan=flowPlan(market);
+    const plan=omegaPlan(market);
     const openPosition=paper.open.find(position=>position.ticker===market.ticker);
     const used=paper.seen.includes(market.ticker);
+    const voteText=market.omega_side
+      ?sideText(market.omega_side)+' '+Number(market.omega_votes)+'/4'
+      :'UP '+Number(market.omega_yes_votes||0)+' · DOWN '+Number(market.omega_no_votes||0);
     let css='wait';
-    let label='ESPERANDO '+thresholdText;
+    let label='ESPERANDO OMEGA';
 
     if(openPosition){
       css=openPosition.side==='yes'?'yes':'no';
@@ -896,27 +1050,28 @@ function renderMarkets(markets){
       label='INTERVALO USADO';
     }else if(!validEntryTime(market)){
       label=remaining>ENTRY_MAX_SECONDS?'AÚN NO COMIENZA':'SIN APUESTA';
-    }else if(!market.flow_available){
-      label='FLUJO NO DISPONIBLE';
+    }else if(!market.binance_available){
+      label='BINANCE NO DISP.';
     }else if(plan){
       css=plan.side==='yes'?'yes':'no';
       label=(paper.active?'ENTRADA ':'SEÑAL ')+sideText(plan.side);
-    }else if(validEntryTime(market)){
-      label='ESPERANDO '+thresholdText;
     }
 
     const planText=plan
-      ?Number(plan.contracts).toFixed(2)+' contratos · $'+Number(plan.cost).toFixed(2)
+      ?Number(market.omega_votes)+'/4 · '+Number(plan.contracts).toFixed(2)
+        +' contratos · $'+Number(plan.cost).toFixed(2)
         +' · activa aprox. '+priceText(plan.estimated_arm_price)
-      :market.flow_window_closed?'Ventana de flujo terminada · sin entrada nueva'
-        :market.flow_available?'Ningún lado ha llegado primero a '+thresholdText
-          :'No entra sin flujo verificable';
+      :String(market.omega_reason||market.binance_message||'Sin señal OMEGA');
     return `<tr><td>${cryptoName(market.series)}</td>
       <td>${priceText(market.yes_ask)}</td><td>${priceText(market.no_ask)}</td>
-      <td>${flowText(market.yes_flow)}</td><td>${flowText(market.no_flow)}</td>
-      <td>${countdown(remaining)}</td><td><span class="pill ${css}">${label}</span></td>
+      <td>${momentumText(market.momentum_1m_pct,market.momentum_5m_pct)}</td>
+      <td>${directionalShare(market.taker_buy_share,'BUY','SELL')}</td>
+      <td>${directionalShare(market.orderbook_bid_share,'BID','ASK')}</td>
+      <td>${directionalShare(market.kalshi_yes_share,'UP','DOWN')}</td>
+      <td>${voteText}</td><td>${countdown(remaining)}</td>
+      <td><span class="pill ${css}">${label}</span></td>
       <td>${planText}</td></tr>`;
-  }).join('')||'<tr><td colspan="8">No hay mercados abiertos ahora</td></tr>';
+  }).join('')||'<tr><td colspan="11">No hay mercados abiertos ahora</td></tr>';
 }
 
 async function refresh(){
