@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OMEGA 15M LIVE</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+<header>
+ <div><div class="eyebrow">OMEGA 15M • LIVE TERMINAL</div>
+ <h1>BTC Decision Desk</h1><p>Datos reales de BTC • sin Kalshi • sin simulación</p></div>
+ <div id="status" class="live">● LIVE</div>
+</header>
+
+<section class="heroGrid">
+ <div class="card"><span>BTC / USD</span><strong id="price">—</strong></div>
+ <div class="card"><span>SEÑAL</span><strong id="signal">WAIT</strong></div>
+ <div class="card"><span>CONFIANZA</span><strong id="confidence">—</strong></div>
+ <div class="card"><span>15M</span><strong id="change">—</strong></div>
+</section>
+
+<section class="decision card">
+ <div class="decisionTitle">DECISIÓN OMEGA</div>
+ <div id="decision" class="decisionText">ESPERANDO DATOS…</div>
+ <div id="reason" class="reason">Los agentes deben estar de acuerdo antes de mostrar entrada.</div>
+</section>
+
+<section class="agents">
+ <div class="agent"><b>🟢 SPOTTER</b><span id="spotter">—</span></div>
+ <div class="agent"><b>🟠 PRIOR</b><span id="prior">—</span></div>
+ <div class="agent"><b>🔺 EDGE</b><span id="edge">—</span></div>
+ <div class="agent"><b>🟣 KELLY</b><span id="kelly">—</span></div>
+ <div class="agent"><b>🔵 TAKER</b><span id="taker">—</span></div>
+ <div class="agent"><b>🔴 CLOSER</b><span id="closer">—</span></div>
+</section>
+
+<section class="grid">
+ <div class="card">
+  <h2>Indicadores</h2>
+  <div class="rows">
+   <div>EMA 3 <b id="ema3">—</b></div><div>EMA 9 <b id="ema9">—</b></div>
+   <div>EMA 21 <b id="ema21">—</b></div><div>VWAP <b id="vwap">—</b></div>
+   <div>RSI 14 <b id="rsi">—</b></div><div>Volume ratio <b id="vol">—</b></div>
+  </div>
+ </div>
+ <div class="card">
+  <h2>Niveles de referencia</h2>
+  <div class="rows">
+   <div>Long TP <b id="ltp">—</b></div><div>Long SL <b id="lsl">—</b></div>
+   <div>Short TP <b id="stp">—</b></div><div>Short SL <b id="ssl">—</b></div>
+  </div>
+  <p class="note">Son niveles técnicos de referencia. No son una garantía de que BTC llegue al precio.</p>
+ </div>
+</section>
+
+<section class="card">
+ <h2>Cómo leerlo</h2>
+ <div class="rules">
+  <div><b>ENTER LONG</b> = varias señales alcistas coinciden.</div>
+  <div><b>ENTER SHORT</b> = varias señales bajistas coinciden.</div>
+  <div><b>WAIT</b> = no hay suficiente confirmación; no entrar.</div>
+  <div><b>EXIT LONG / EXIT SHORT</b> = se perdió parte de la estructura de la operación.</div>
+ </div>
+ <p class="warning">⚠️ Esta terminal muestra señales basadas en datos de mercado; no predice el futuro ni garantiza ganancias. Úsala como herramienta de decisión, no como una orden automática.</p>
+</section>
+</div>
+
+<script>
+function fmt(x){return x==null?"—":"$"+Number(x).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
+function n(x,d=2){return x==null?"—":Number(x).toFixed(d)}
+function set(id,v){document.getElementById(id).textContent=v}
+
+async function refresh(){
+ try{
+  const r=await fetch("/api/data",{cache:"no-store"}); const j=await r.json();
+  if(j.error){set("status","● ERROR"); return}
+  const d=j.data, a=d.agents, i=d.indicators, l=d.levels, c=d.candle15;
+  set("status","● LIVE"); set("price",fmt(d.price));
+  set("signal",d.signal); set("confidence",n(d.confidence,1)+"%");
+  set("change",n(c.change_pct,3)+"%");
+  const decision = d.signal==="WAIT" ? "⏸ ESPERAR — NO ENTRAR" :
+                   d.signal==="ENTER LONG" ? "🟢 ENTRAR LONG / UP" :
+                   "🔴 ENTRAR SHORT / DOWN";
+  set("decision",decision);
+  set("reason",`EMA3 ${d.indicators.ema3>d.indicators.ema9?"↑ sobre":"↓ bajo"} EMA9 • precio ${d.price>d.indicators.vwap?"sobre":"bajo"} VWAP • RSI ${n(i.rsi,1)}`);
+
+  set("spotter",n(a.spotter,3)); set("prior",n(a.prior,3)); set("edge",n(a.edge,3));
+  set("kelly",n(a.kelly_confidence,1)+"%"); set("taker",a.taker); set("closer",a.closer);
+  set("ema3",fmt(i.ema3)); set("ema9",fmt(i.ema9)); set("ema21",fmt(i.ema21));
+  set("vwap",fmt(i.vwap)); set("rsi",n(i.rsi,1)); set("vol",n(i.volume_ratio,2)+"x");
+  set("ltp",fmt(l.long_tp)); set("lsl",fmt(l.long_sl));
+  set("stp",fmt(l.short_tp)); set("ssl",fmt(l.short_sl));
+ }catch(e){set("status","● OFFLINE")}
+}
+refresh(); setInterval(refresh,5000);
+</script>
+</body>
+</html>
