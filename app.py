@@ -199,19 +199,19 @@ def data():
         return jsonify({"data":STATE["data"],"error":STATE["error"]})
 
 def _start_loop_once():
-        """Start Binance poller once per process. Under gunicorn call from before_request
-            so the thread runs inside the worker (not only the master before fork)."""
-        if getattr(app, "_omega_loop_started", False):
-                    return
-                app._omega_loop_started = True
+    """Start Binance poller once per process. Under gunicorn call from before_request
+    so the thread runs inside the worker (not only the master before fork)."""
+    if getattr(app, "_omega_loop_started", False):
+        return
+    app._omega_loop_started = True
     threading.Thread(target=loop, daemon=True, name="omega-loop").start()
 
 
 @app.before_request
 def _ensure_loop():
-        _start_loop_once()
+    _start_loop_once()
 
 
 if __name__ == "__main__":
-        _start_loop_once()
+    _start_loop_once()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
