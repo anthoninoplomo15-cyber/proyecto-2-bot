@@ -78,8 +78,9 @@ function set(id,v){document.getElementById(id).textContent=v}
 async function refresh(){
  try{
   const r=await fetch("/api/data",{cache:"no-store"}); const j=await r.json();
-  if(j.error){set("status","● ERROR"); return}
-  const d=j.data, a=d.agents, i=d.indicators, l=d.levels, c=d.candle15;
+  if(j.error){set("status","● ERROR"); set("decision","ERROR: "+j.error); return}
+    if(!j.data){set("status","● WAIT"); set("decision","CARGANDO DATOS…"); return}
+    const d=j.data, a=d.agents, i=d.indicators, l=d.levels, c=d.candle15;
   set("status","● LIVE"); set("price",fmt(d.price));
   set("signal",d.signal); set("confidence",n(d.confidence,1)+"%");
   set("change",n(c.change_pct,3)+"%");
