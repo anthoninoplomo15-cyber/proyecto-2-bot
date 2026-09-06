@@ -1,5 +1,6 @@
 <!doctype html>
-<html lang="es"><head>
+<html lang="es">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>OMEGA 15M DESK</title>
@@ -12,7 +13,7 @@
     <div class="topmeta">
       <div class="pill on" id="swarm">SWARM ONLINE · 6 AGENTS</div>
       <div class="pill" id="mode">SIGNALS ONLY</div>
-      <div class="pill" id="status">● OFFLINE</div>
+      <div class="pill" id="status">● LIVE</div>
       <div class="pill" id="clock">—</div>
     </div>
   </div>
@@ -41,8 +42,9 @@
       </div>
       <div class="big" id="decision">ESPERANDO…</div>
       <div class="sub" id="reason">—</div>
-      <div id="light" class="light-pill light-red">🔴 WAIT</div>
+      <div id="light" class="light-pill light-red">🔴 CARO</div>
       <div class="sub edge-line" id="edgeLine">—</div>
+      <div class="sub" id="lightHint" style="margin-top:4px;font-size:11px;color:#8b949e">Luz = precio Kalshi. Arriba = entrar o no.</div>
       <div class="phases" id="phases">
         <div class="phase" data-p="0">0–3 DATA</div>
         <div class="phase" data-p="1">3–6 ANALYZE</div>
@@ -132,7 +134,8 @@ async function refresh(){
   const pi=phaseIndex(t.name);
   document.querySelectorAll(".phase").forEach(el=>{el.classList.toggle("active", Number(el.dataset.p)===pi)});
   const lines=(d.activity||[]).map(x=> (x.ts||"").slice(11,19)+"  "+x.line);
-  document.getElementById("log").textContent = lines.length? lines.join("\n") : "Esperando ciclos…";
+  document.getElementById("log").textContent = lines.length? lines.join("
+") : "Esperando ciclos…";
   set("kticker", k.ticker||k.error||"—"); set("kstrike", k.strike!=null?fmt(k.strike):"—");
   set("kyes", k.yes_ask!=null?n(k.yes_ask,2):"—"); set("kno", k.no_ask!=null?n(k.no_ask,2):"—");
   set("khint", k.hint||"—");
@@ -141,7 +144,7 @@ async function refresh(){
   if(lightEl){
     const go=!!da.operate;
     lightEl.className="light-pill "+(go?"light-green":"light-red");
-    lightEl.textContent=go?"🟢 OPERATE":"🔴 WAIT";
+    lightEl.textContent=go?"🟢 BARATO":"🔴 CARO";
   }
   set("edgeLine", da.line||"—");
   if(da.edge_cents!=null && da.label){
@@ -156,6 +159,5 @@ async function refresh(){
 }
 refresh(); setInterval(refresh,5000);
 </script>
-
-
-</body></html>
+</body>
+</html>
