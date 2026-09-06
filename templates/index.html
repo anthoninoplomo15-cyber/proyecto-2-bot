@@ -1,91 +1,98 @@
 <!doctype html>
-<html lang="es">
-<head>
+<html lang="es"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OMEGA 15M LIVE</title>
+<title>OMEGA 15M DESK</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <div class="wrap">
-<header>
- <div><div class="eyebrow">OMEGA 15M • LIVE TERMINAL</div>
- <h1>BTC Decision Desk</h1><p>Datos reales Binance + Kalshi 15m • whales = prints grandes  sin órdenes</p></div>
- <div id="status" class="live">● LIVE</div>
-</header>
-
-<section class="heroGrid">
- <div class="card"><span>BTC / USD</span><strong id="price">—</strong></div>
- <div class="card"><span>SEñAL</span><strong id="signal">WAIT</strong></div>
- <div class="card"><span>CONFIANZA</span><strong id="confidence">—</strong></div>
- <div class="card"><span>15M LEFT</span><strong id="rem">—</strong></div>
-</section>
-
-<section class="decision card">
- <div class="decisionTitle">DECISIóN OMEGA</div>
- <div id="decision" class="decisionText">ESPERANDO DATOS…</div>
- <div id="reason" class="reason">Libro + flujo + whales reales + EMAs deben alinearse.</div>
-</section>
-
-<section class="agents">
- <div class="agent"><b>🟢 SPOTTER</b><span id="spotter">—</span></div>
- <div class="agent"><b>🟠 PRIOR</b><span id="prior">—</span></div>
- <div class="agent"><b>📘 BOOK</b><span id="bookA">—</span></div>
- <div class="agent"><b>🌊 FLOW</b><span id="flowA">—</span></div>
- <div class="agent"><b>🐋 WHALE</b><span id="whaleA">—</span></div>
- <div class="agent"><b>🔺 EDGE</b><span id="edge">—</span></div>
-</section>
-<section class="agents">
- <div class="agent"><b>🟣 KELLY</b><span id="kelly">—</span></div>
- <div class="agent"><b>🔵 TAKER</b><span id="taker">—</span></div>
- <div class="agent"><b>🔴 CLOSER</b><span id="closer">—</span></div>
- <div class="agent"><b>📗 BID$</b><span id="bidusd">—</span></div>
- <div class="agent"><b>📕 ASK$</b><span id="askusd">—</span></div>
- <div class="agent"><b>⚖ IMB</b><span id="imb"></span></div>
-</section>
-
-<section class="grid">
- <div class="card">
-  <h2>Kalshi BTC 15m</h2>
-  <div class="rows">
-   <div>Ticker <b id="kticker">—</b></div>
-   <div>Strike <b id="kstrike">—</b></div>
-   <div>YES ask <b id="kyes">—</b></div>
-   <div>NO ask <b id="kno">—</b></div>
-   <div>Hint <b id="khint">—</b></div>
-   <div>Gap <b id="kgap">—</b></div>
+  <div class="topbar">
+    <div class="brand">🧠 OMEGA 15M DESK</div>
+    <div class="topmeta">
+      <div class="pill on" id="swarm">SWARM ONLINE · 6 AGENTS</div>
+      <div class="pill" id="mode">SIGNALS ONLY</div>
+      <div class="pill" id="status">● OFFLINE</div>
+      <div class="pill" id="clock">—</div>
+    </div>
   </div>
- </div>
- <div class="card">
-  <h2>Whales reales (Binance ≥ $75k)</h2>
-  <div class="rows">
-   <div>Count <b id="wcount">—</b></div>
-   <div>Buy $ <b id="wbuy">—</b></div>
-   <div>Sell $ <b id="wsell">—</b></div>
-   <div>Net $ <b id="wnet">—</b></div>
-  </div>
-  <pre id="wlist" class="note" style="white-space:pre-wrap;margin-top:10px;color:#9da6ad"></pre>
- </div>
-</section>
 
-<section class="grid">
- <div class="card">
-  <h2>Indicadores</h2>
-  <div class="rows">
-   <div>EMA 3 <b id="ema3">—</b></div><div>EMA 9 <b id="ema9">—</b></div>
-   <div>EMA 21 <b id="ema21">—</b></div><div>VWAP <b id="vwap">—</b></div>
-   <div>RSI 14 <b id="rsi">—</b></div><div>Vol ratio <b id="vol">—</b></div>
-  </div>
- </div>
- <div class="card">
-  <h2>Niveles ref.</h2>
-  <div class="rows">
-   <div>Long TP <b id="ltp">—</b></div><div>Long SL <b id="lsl">—</b></div>
-   <div>Short TP <b id="stp">—</b></div><div>Short SL <b id="ssl">—</b></div>
-  </div>
-  <p class="warning">⚠️ Whales = trades reales grandes en Binance, no alertas on-chain inventadas. No coloca órdenes en Kalshi.</p>
- </div>
-</section>
+  <section class="grid3">
+    <div class="card">
+      <div class="label">BTC / USD</div>
+      <div class="big" id="price">—</div>
+      <div class="sub" id="change">15m change —</div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat"><div class="label">BOOK IMB</div><b id="imb">—</b></div>
+        <div class="stat"><div class="label">FLOW</div><b id="flow">—</b></div>
+      </div>
+    </div>
+
+    <div class="card omega">
+      <div class="title">OMEGA 15M · AGENT RING</div>
+      <div class="pipeline">
+        <div class="node n-spotter">🟢 SPOTTER<span id="spotter">—</span></div>
+        <div class="node n-prior">🟠 PRIOR<span id="prior">—</span></div>
+        <div class="node n-edge">🔺 EDGE<span id="edge">—</span></div>
+        <div class="node n-whale">🐋 WHALE<span id="whale">—</span></div>
+        <div class="node n-kelly">🟣 KELLY<span id="kelly">—</span></div>
+        <div class="node n-taker">🔵 TAKER<span id="taker">—</span></div>
+        <div class="node n-closer">🔴 CLOSER<span id="closer">—</span></div>
+      </div>
+      <div class="big" id="decision">ESPERANDO…</div>
+      <div class="sub" id="reason">—</div>
+      <div id="light" class="light-pill light-red">🔴 WAIT</div>
+      <div class="sub edge-line" id="edgeLine">—</div>
+      <div class="phases" id="phases">
+        <div class="phase" data-p="0">0–3 DATA</div>
+        <div class="phase" data-p="1">3–6 ANALYZE</div>
+        <div class="phase" data-p="2">6–8 CONSENSUS</div>
+        <div class="phase" data-p="3">8–12 CONFIRM</div>
+        <div class="phase" data-p="4">12–15 EXECUTE</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">NEXT 15M</div>
+      <div class="big" id="next">WAIT</div>
+      <div class="stats">
+        <div class="stat"><div class="label">PROBABILITY</div><b id="prob">—</b></div>
+        <div class="stat"><div class="label">CONFIDENCE</div><b id="conf">—</b></div>
+        <div class="stat"><div class="label">WHALE FLOW</div><b id="wflow">—</b></div>
+        <div class="stat"><div class="label">WINDOW</div><b id="rem">—</b></div>
+      </div>
+      <div class="sub" style="margin-top:10px" id="phaseTip">—</div>
+    </div>
+  </section>
+
+  <section class="row2">
+    <div class="card">
+      <h2>ACTIVITY LOG (real)</h2>
+      <div class="log" id="log">—</div>
+    </div>
+    <div class="card">
+      <h2>KALSHI BTC 15M</h2>
+      <div class="stats">
+        <div class="stat"><div class="label">TICKER</div><b id="kticker" style="font-size:12px">—</b></div>
+        <div class="stat"><div class="label">STRIKE</div><b id="kstrike" style="font-size:14px">—</b></div>
+        <div class="stat"><div class="label">YES ASK</div><b id="kyes">—</b></div>
+        <div class="stat"><div class="label">NO ASK</div><b id="kno">—</b></div>
+      </div>
+      <div class="sub" style="margin-top:10px" id="khint">—</div>
+      <div class="sub kedge" id="kedge">—</div>
+      <p class="warning">Esto imita el layout de las fotos. Whale flow = prints Binance ≥ $75k (reales). No hay PnL falso de $67k ni órdenes automáticas.</p>
+    </div>
+  </section>
+
+  <section class="agents">
+    <div class="agent"><b>BID$ TOP10</b><span id="bidusd">—</span></div>
+    <div class="agent"><b>ASK$ TOP10</b><span id="askusd">—</span></div>
+    <div class="agent"><b>WHALE BUY</b><span id="wbuy">—</span></div>
+    <div class="agent"><b>WHALE SELL</b><span id="wsell">—</span></div>
+    <div class="agent"><b>EMA3/9</b><span id="emas">—</span></div>
+    <div class="agent"><b>RSI</b><span id="rsi">—</span></div>
+    <div class="agent"><b>VWAP</b><span id="vwap">—</span></div>
+  </section>
 </div>
 <script>
 function fmt(x){return x==null?"—":"$"+Number(x).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
@@ -93,42 +100,62 @@ function usd(x){return x==null?"—":"$"+Number(x).toLocaleString(undefined,{max
 function n(x,d=2){return x==null?"—":Number(x).toFixed(d)}
 function set(id,v){const el=document.getElementById(id); if(el) el.textContent=v}
 function mmss(s){s=Math.max(0,Number(s)||0); const m=Math.floor(s/60), r=s%60; return m+":"+String(r).padStart(2,"0")}
-
+function phaseIndex(name){
+  if(!name) return -1;
+  if(name.startsWith("0–3")) return 0;
+  if(name.startsWith("3–6")) return 1;
+  if(name.startsWith("6–8")) return 2;
+  if(name.startsWith("8–12")) return 3;
+  return 4;
+}
 async function refresh(){
  try{
   const r=await fetch("/api/data",{cache:"no-store"}); const j=await r.json();
   if(j.error){set("status","● ERROR"); set("decision","ERROR: "+j.error); return}
-  if(!j.data){set("status","● WAIT"); set("decision","CARGANDO DATOS…"); return}
-  const d=j.data, a=d.agents, i=d.indicators, l=d.levels, c=d.candle15, f=d.flow, b=d.book, k=d.kalshi_btc15m||{};
-  set("status","● LIVE"); set("price",fmt(d.price));
-  set("signal",d.signal); set("confidence",n(d.confidence,1)+"%");
-  set("rem", mmss((d.window&&d.window.seconds_remaining)||0));
-  const decision = d.signal==="WAIT" ? "⏸ ESPERAR — NO ENTRAR" :
-                   d.signal==="ENTER LONG" ? "🟢 ENTRAR LONG / UP" :
-                   "🔴 ENTRAR SHORT / DOWN";
-  set("decision",decision);
-  set("reason", `IMA libro ${n(b.imbalance,3)} • flow ${n(f.flow,3)} • whales net ${usd(f.whale_net_usd)} • RSI ${n(i.rsi,1)}`);
-
-  set("spotter",n(a.spotter,3)); set("prior",n(a.prior,3)); set("bookA",n(a.book,3));
-  set("flowA",n(a.flow,3)); set("whaleA",n(a.whale,3)); set("edge",n(a.edge,3));
-  set("kelly",n(a.kelly_confidence,1)+"%"); set("taker",a.taker); set("closer",a.closer);
-  set("bidusd",usd(b.bid_usd_top10)); set("askusd",usd(b.ask_usd_top10)); set("imb",n(b.imbalance,3));
-
-  set("kticker", k.ticker|| (k.error||"—")); set("kstrike", k.strike!=null?fmt(k.strike):"—");
+  if(!j.data){set("status","● WAIT"); set("decision","CARGANDO…"); return}
+  const d=j.data, a=d.agents||{}, i=d.indicators||{}, f=d.flow||{}, b=d.book||{}, k=d.kalshi_btc15m||{}, t=d.timeline||{};
+  set("status","● LIVE");
+  set("clock", new Date().toISOString().slice(11,19)+"Z");
+  set("mode",(d.swarm&&d.swarm.mode)||"SIGNALS ONLY");
+  set("price",fmt(d.price));
+  set("change","15m "+n((d.candle15||{}).change_pct,3)+"%");
+  set("imb", n(b.imbalance,3)); set("flow", n(f.flow,3));
+  set("spotter",n(a.spotter,3)); set("prior",n(a.prior,3)); set("edge",n(a.edge,3));
+  set("whale",n(a.whale,3)); set("kelly",n(a.kelly_confidence,1)+"%"); set("taker",a.taker||"—"); set("closer",a.closer||"—");
+  const decision = d.signal==="WAIT" ? "⏸ WAIT — NO ENTRAR" : d.signal==="ENTER LONG" ? "🟢 NEXT 15M · UP" : "🔴 NEXT 15M · DOWN";
+  set("decision", decision);
+  set("reason", t.tip || "—");
+  set("next", d.next_15m||"WAIT");
+  set("prob", n(d.probability,1)+"%"); set("conf", (d.probability>=70?"HIGH":d.probability>=55?"MED":"LOW"));
+  set("wflow", usd(d.whale_flow_usd)); set("rem", mmss((d.window||{}).seconds_remaining||t.rem_s));
+  set("phaseTip", (t.name||"")+" · "+(t.tip||""));
+  const pi=phaseIndex(t.name);
+  document.querySelectorAll(".phase").forEach(el=>{el.classList.toggle("active", Number(el.dataset.p)===pi)});
+  const lines=(d.activity||[]).map(x=> (x.ts||"").slice(11,19)+"  "+x.line);
+  document.getElementById("log").textContent = lines.length? lines.join("\n") : "Esperando ciclos…";
+  set("kticker", k.ticker||k.error||"—"); set("kstrike", k.strike!=null?fmt(k.strike):"—");
   set("kyes", k.yes_ask!=null?n(k.yes_ask,2):"—"); set("kno", k.no_ask!=null?n(k.no_ask,2):"—");
-  set("khint", k.hint||"—"); set("kgap", k.gap_pct!=null?n(k.gap_pct,3)+"%":"—");
-
-  set("wcount", f.whale_count); set("wbuy",usd(f.whale_buy_usd)); set("wsell",usd(f.whale_sell_usd)); set("wnet",usd(f.whale_net_usd));
-  const lines=(f.whales||[]).map(w=>`${w.side} ${usd(w.usd)} @ ${fmt(w.price)}`);
-  document.getElementById("wlist").textContent = lines.length? lines.join("\n") : "Sin prints ≥ $75k en la cinta reciente";
-
-  set("ema3",fmt(i.ema3)); set("ema9",fmt(i.ema9)); set("ema21",fmt(i.ema21));
-  set("vwap",fmt(i.vwap)); set("rsi",n(i.rsi,1)); set("vol",n(i.volume_ratio,2)+"x");
-  set("ltp",fmt(l.long_tp)); set("lsl",fmt(l.long_sl));
-  set("stp",fmt(l.short_tp)); set("ssl",fmt(l.short_sl));
+  set("khint", k.hint||"—");
+  const da=d.decision_aid||{};
+  const lightEl=document.getElementById("light");
+  if(lightEl){
+    const go=!!da.operate;
+    lightEl.className="light-pill "+(go?"light-green":"light-red");
+    lightEl.textContent=go?"🟢 OPERATE":"🔴 WAIT";
+  }
+  set("edgeLine", da.line||"—");
+  if(da.edge_cents!=null && da.label){
+    set("kedge", "EDGE "+Number(da.edge_cents).toFixed(1)+"¢ · "+da.label+(da.side?" · "+da.side:""));
+  }else{
+    set("kedge", da.line||"—");
+  }
+  set("bidusd", usd(b.bid_usd_top10)); set("askusd", usd(b.ask_usd_top10));
+  set("wbuy", usd(f.whale_buy_usd)); set("wsell", usd(f.whale_sell_usd));
+  set("emas", n(i.ema3,0)+" / "+n(i.ema9,0)); set("rsi", n(i.rsi,1)); set("vwap", fmt(i.vwap));
  }catch(e){set("status","● OFFLINE")}
 }
 refresh(); setInterval(refresh,5000);
 </script>
-</body>
-</html>
+
+
+</body></html>
