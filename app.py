@@ -1,4 +1,4 @@
-import os, time, threading
+import os, time, threading, math
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, render_template
 import requests
@@ -14,6 +14,8 @@ WHALE_USD = 75000.0  # real large prints; not fake "whale flow"
 
 lock = threading.Lock()
 STATE = {"data": None, "error": None, "updated": None}
+ACTIVITY = []  # recent real events for desk log
+
 
 
 def _binance_get(path, params):
@@ -210,6 +212,23 @@ def aggressor_and_whales(trades):
     }
 
 
+
+def timeline_phase(rem_s: int) -> dict:
+    """Map seconds left in 15m window to the photo-style phases (elapsed view)."""
+    elapsed = max(0, 900 - int(rem_s or 0))
+    if elapsed < 180:
+        name, tip = "0–3 DATA", "Recopilando precio, libro, flujo, whales"
+    elif elapsed < 360:
+        name, tip = "3–6 ANALYZE", "Agentes Spotter/Prior/Book/Flow/Whale"
+    elif elapsed < 480:
+        name, tip = "6–8 CONSENSUS", "Buscando acuerdo entre señales"
+    elif elapsed < 720:
+        name, tip = "8–12 CONFIRM", "Esperando confirmación / evitar ruido"
+    else:
+        name, tip = "12–15 EXECUTE", "Ventana tardía: solo setups muy limpios"
+    return {"elapsed_s": elapsed, "name": name, "tip": tip, "rem_s": int(rem_s or 0)}
+
+
 def analyze():
     ks = fetch_klines(120)
     price = fetch_price()
@@ -292,17 +311,88 @@ def analyze():
 
     # Kalshi alignment hint (spot vs strike)
     kalshi_hint = None
+    gap_pct = None
     if isinstance(kalshi, dict) and kalshi.get("strike"):
         strike = kalshi["strike"]
-        gap = (price - strike) / strike * 100
+        gap_pct = (price - strike) / strike * 100
         if price > strike:
             kalshi_hint = "spot ABOVE strike → favor YES/UP"
         elif price < strike:
             kalshi_hint = "spot BELOW strike → favor NO/DOWN"
         else:
             kalshi_hint = "spot ≈ strike"
-        kalshi["gap_pct"] = round(gap, 4)
+        kalshi["gap_pct"] = round(gap_pct, 4)
         kalshi["hint"] = kalshi_hint
+
+    # Decision aid: Kalshi cheap vs expensive + green/red semaphore
+    EDGE_MIN = 3.0
+
+    def _norm_ask(x):
+        if x is None:
+            return None
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return v / 100.0 if v > 1 else v
+
+    decision_aid = {
+        "side": "UP",
+        "fair_cents": 50.0,
+        "kalshi_ask_cents": None,
+        "edge_cents": 0.0,
+        "label": "JUSTO",
+        "operate": False,
+        "light": "red",
+        "line": "Sin datos Kalshi — WAIT / no entrar",
+    }
+
+    kalshi_ok = (
+        isinstance(kalshi, dict)
+        and not kalshi.get("error")
+        and kalshi.get("strike")
+        and gap_pct is not None
+    )
+    if kalshi_ok:
+        fair_yes = 0.5 + math.tanh(gap_pct / 0.08) * 0.45
+        fair_yes = max(0.05, min(0.95, fair_yes))
+        favor_yes = fair_yes >= 0.5
+        side_da = "UP" if favor_yes else "DOWN"
+        fair_cents = fair_yes * 100 if favor_yes else (1 - fair_yes) * 100
+        yes_n = _norm_ask(kalshi.get("yes_ask"))
+        no_n = _norm_ask(kalshi.get("no_ask"))
+        ask_prob = yes_n if favor_yes else no_n
+        if ask_prob is None:
+            decision_aid["line"] = "Kalshi sin ask — WAIT / no entrar"
+            decision_aid["side"] = side_da
+            decision_aid["fair_cents"] = round(fair_cents, 1)
+        else:
+            kalshi_ask_cents = ask_prob * 100
+            edge_cents = fair_cents - kalshi_ask_cents
+            if edge_cents >= 0.5:
+                label = "BARATO"
+            elif edge_cents <= -0.5:
+                label = "CARO"
+            else:
+                label = "JUSTO"
+            operate = edge_cents >= EDGE_MIN
+            light = "green" if operate else "red"
+            line = (
+                f"{side_da} ~{fair_cents:.0f}¢ justo, Kalshi {kalshi_ask_cents:.0f}¢ "
+                f"→ {label} ({edge_cents:+.0f}¢)"
+            )
+            decision_aid = {
+                "side": side_da,
+                "fair_cents": round(fair_cents, 1),
+                "kalshi_ask_cents": round(kalshi_ask_cents, 1),
+                "edge_cents": round(edge_cents, 1),
+                "label": label,
+                "operate": operate,
+                "light": light,
+                "line": line,
+            }
+    elif isinstance(kalshi, dict) and kalshi.get("error"):
+        decision_aid["line"] = f"Sin datos Kalshi ({kalshi.get('error')}) — WAIT"
 
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -355,7 +445,18 @@ def analyze():
         "notes": {
             "whales": f"Real Binance prints ≥ ${int(WHALE_USD):,} (not fake whale alerts)",
             "kalshi": "Public KXBTC15M odds; terminal does not place orders",
+            "ui": "Desk-style layout; no fake swarm PnL",
         },
+        "timeline": timeline_phase((kalshi or {}).get("seconds_remaining") if isinstance(kalshi, dict) else rem15),
+        "probability": round(confidence, 1),
+        "next_15m": side if side in {"UP", "DOWN"} else "WAIT",
+        "whale_flow_usd": flow.get("whale_net_usd"),
+        "swarm": {
+            "agents_live": 6,
+            "mode": "SIGNALS ONLY",
+            "human": "YOU decide entries — no auto orders",
+        },
+        "decision_aid": decision_aid,
     }
 
 
@@ -363,10 +464,24 @@ def loop():
     while True:
         try:
             d = analyze()
+            da = d.get("decision_aid") or {}
+            light_tag = "🟢" if da.get("light") == "green" else "🔴"
+            line = (
+                f"{d['signal']} conf={d['confidence']}% "
+                f"flow={d['flow']['flow']} whales={d['flow']['whale_count']} "
+                f"net={d['flow']['whale_net_usd']} "
+                f"kalshi={(d.get('kalshi_btc15m') or {}).get('hint')} "
+                f"{light_tag} {da.get('label') or '—'} "
+                f"edge={da.get('edge_cents')}"
+            )
             with lock:
                 STATE["data"] = d
                 STATE["error"] = None
                 STATE["updated"] = time.time()
+                ACTIVITY.append({"ts": d["timestamp"], "line": line})
+                del ACTIVITY[:-40]
+                d["activity"] = list(reversed(ACTIVITY[-12:]))
+                STATE["data"] = d
         except Exception as e:
             with lock:
                 STATE["error"] = str(e)
