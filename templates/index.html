@@ -112,13 +112,20 @@ function phaseIndex(name){
 }
 async function refresh(){
  try{
-  const r=await fetch("/api/data",{cache:"no-store"}); const j=await r.json();
-  if(j.error){set("status","● ERROR"); set("decision","ERROR: "+j.error); return}
-  if(!j.data){set("status","● WAIT"); set("decision","CARGANDO…"); return}
+  const ctrl=new AbortController();
+  const to=setTimeout(()=>ctrl.abort(),12000);
+  const r=await fetch("/api/data",{cache:"no-store",signal:ctrl.signal});
+  clearTimeout(to);
+  if(!r.ok){set("status","● ERROR"); set("decision","API HTTP "+r.status); return}
+  const j=await r.json();
+  // Prefer data even if a stale error string remains
+  if(!j.data){set("status","● WAIT"); set("decision", j.error?("ERROR: "+j.error):"CARGANDO…"); return}
+  if(j.error){set("status","● LIVE · warn");}
+  else {set("status","● LIVE");}
   const d=j.data, a=d.agents||{}, i=d.indicators||{}, f=d.flow||{}, b=d.book||{}, k=d.kalshi_btc15m||{}, t=d.timeline||{};
-  set("status","● LIVE");
   set("clock", new Date().toISOString().slice(11,19)+"Z");
   set("mode",(d.swarm&&d.swarm.mode)||"SIGNALS ONLY");
+  set("swarm","SWARM ONLINE · "+((d.swarm&&d.swarm.agents_live)||6)+" AGENTS");
   set("price",fmt(d.price));
   set("change","15m "+n((d.candle15||{}).change_pct,3)+"%");
   set("imb", n(b.imbalance,3)); set("flow", n(f.flow,3));
@@ -134,8 +141,7 @@ async function refresh(){
   const pi=phaseIndex(t.name);
   document.querySelectorAll(".phase").forEach(el=>{el.classList.toggle("active", Number(el.dataset.p)===pi)});
   const lines=(d.activity||[]).map(x=> (x.ts||"").slice(11,19)+"  "+x.line);
-  document.getElementById("log").textContent = lines.length? lines.join("
-") : "Esperando ciclos…";
+  document.getElementById("log").textContent = lines.length? lines.join("\n") : "Esperando ciclos…";
   set("kticker", k.ticker||k.error||"—"); set("kstrike", k.strike!=null?fmt(k.strike):"—");
   set("kyes", k.yes_ask!=null?n(k.yes_ask,2):"—"); set("kno", k.no_ask!=null?n(k.no_ask,2):"—");
   set("khint", k.hint||"—");
@@ -155,7 +161,7 @@ async function refresh(){
   set("bidusd", usd(b.bid_usd_top10)); set("askusd", usd(b.ask_usd_top10));
   set("wbuy", usd(f.whale_buy_usd)); set("wsell", usd(f.whale_sell_usd));
   set("emas", n(i.ema3,0)+" / "+n(i.ema9,0)); set("rsi", n(i.rsi,1)); set("vwap", fmt(i.vwap));
- }catch(e){set("status","● OFFLINE")}
+ }catch(e){set("status","● OFFLINE"); set("decision","SIN DATA: "+(e&&e.name==="AbortError"?"timeout":(e&&e.message)||e));}
 }
 refresh(); setInterval(refresh,5000);
 </script>
