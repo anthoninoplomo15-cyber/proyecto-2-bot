@@ -40,6 +40,7 @@
         <div class="node n-kelly">🟣 KELLY<span id="kelly">—</span></div>
         <div class="node n-taker">🔵 TAKER<span id="taker">—</span></div>
         <div class="node n-closer">🔴 CLOSER<span id="closer">—</span></div>
+        <div class="node n-regime">🧭 REGIME<span id="regime">—</span></div>
       </div>
       <div class="big" id="decision">ESPERANDO…</div>
       <div class="sub" id="reason">—</div>
@@ -133,15 +134,20 @@ async function refresh(){
   const d=j.data, a=d.agents||{}, i=d.indicators||{}, f=d.flow||{}, b=d.book||{}, k=d.kalshi_btc15m||{}, t=d.timeline||{};
   set("clock", new Date().toISOString().slice(11,19)+"Z");
   set("mode",(d.swarm&&d.swarm.mode)||"SIGNALS ONLY");
-  set("swarm","SWARM ONLINE · "+((d.swarm&&d.swarm.agents_live)||6)+" AGENTS");
+  set("swarm","SWARM ONLINE · "+((d.swarm&&d.swarm.agents_live)||7)+" AGENTS");
   set("price",fmt(d.price));
   set("change","15m "+n((d.candle15||{}).change_pct,3)+"%");
   set("imb", n(b.imbalance,3)); set("flow", n(f.flow,3));
   set("spotter",n(a.spotter,3)); set("prior",n(a.prior,3)); set("edge",n(a.edge,3));
   set("whale",n(a.whale,3)); set("kelly",n(a.kelly_confidence,1)+"%"); set("taker",a.taker||"—"); set("closer",a.closer||"—");
+  const reg=a.regime||(d.regime&&d.regime.label)||"—";
+  set("regime", reg+(a.regime_er!=null?(" · er "+n(a.regime_er,2)):""))
+  const regEl=document.getElementById("regime");
+  if(regEl){ regEl.parentElement.classList.toggle("chop", reg==="CHOP"); regEl.parentElement.classList.toggle("trend", reg==="TREND"); }
+
   const decision = d.signal==="WAIT" ? "⏸ WAIT — NO ENTRAR" : d.signal==="ENTER LONG" ? "🟢 NEXT 15M · UP" : "🔴 NEXT 15M · DOWN";
   set("decision", decision);
-  set("reason", t.tip || "—");
+  set("reason", (a.regime_tip? (a.regime_tip+" · ") : "") + (t.tip || "—"));
   set("next", d.next_15m||"WAIT");
   set("prob", n(d.probability,1)+"%"); set("conf", (d.probability>=70?"HIGH":d.probability>=55?"MED":"LOW"));
   set("wflow", usd(d.whale_flow_usd)); set("rem", mmss((d.window||{}).seconds_remaining||t.rem_s));
