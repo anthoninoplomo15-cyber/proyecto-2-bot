@@ -37,3 +37,7 @@
 .light-red{color:#f0a0a0;border-color:#9e3a3a;background:#1f0d0d;box-shadow:0 0 18px rgba(180,60,60,.3)}
 .edge-line{margin:4px 0 8px;font-size:13px;font-weight:600;color:#c9d2dc}
 .kedge{margin-top:6px;font-size:13px;font-weight:700;color:#9ff0c4}
+
+.pill.open-risk{border-color:#a67c2a;color:#f0c36a;display:none}
+.pill.open-risk.on{display:inline-block;background:#1a1408;box-shadow:0 0 12px rgba(240,180,60,.25)}
+.open-wick{margin-top:2px;font-size:11px;color:#f0c36a;min-height:14px}
