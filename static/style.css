@@ -41,3 +41,7 @@
 .pill.open-risk{border-color:#a67c2a;color:#f0c36a;display:none}
 .pill.open-risk.on{display:inline-block;background:#1a1408;box-shadow:0 0 12px rgba(240,180,60,.25)}
 .open-wick{margin-top:2px;font-size:11px;color:#f0c36a;min-height:14px}
+
+.n-regime{border-color:#3d6b8a}
+.n-regime.chop{border-color:#a67c2a;color:#f0c36a}
+.n-regime.trend{border-color:#2f9e62;color:#8af0b8}
