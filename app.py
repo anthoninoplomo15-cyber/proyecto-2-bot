@@ -347,6 +347,74 @@ def timeline_phase(rem_s: int) -> dict:
     return {"elapsed_s": elapsed, "name": name, "tip": tip, "rem_s": int(rem_s or 0)}
 
 
+
+def fetch_coinbase_btc():
+    r = requests.get(
+        "https://api.coinbase.com/v2/prices/BTC-USD/spot",
+        timeout=(2.0, 4.0),
+    )
+    r.raise_for_status()
+    return float(r.json()["data"]["amount"])
+
+
+def analyze_fallback(err: str):
+    """Minimal desk payload when Binance is unreachable from Render."""
+    price = fetch_coinbase_btc()
+    rem15, window_end = window_countdown()
+    open_session = fetch_es_open_wick()
+    decision_aid = {
+        "side": "UP",
+        "fair_cents": 50.0,
+        "kalshi_ask_cents": None,
+        "edge_cents": 0.0,
+        "label": "JUSTO",
+        "operate": False,
+        "light": "red",
+        "line": f"Fallback Coinbase — Binance falló: {err}",
+    }
+    kalshi = None
+    try:
+        kalshi = fetch_kalshi_btc15m()
+    except Exception as e:
+        kalshi = {"error": str(e)}
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "price": price,
+        "window": {"seconds_remaining": rem15, "ends_at": window_end},
+        "candle15": {"open": price, "high": price, "low": price, "close": price, "volume": 0, "change_pct": 0},
+        "indicators": {"ema3": price, "ema9": price, "ema21": price, "rsi": 50.0, "vwap": price, "atr14_1m": 0, "volume_ratio": 1},
+        "book": {"imbalance": 0.0, "bid_usd_top10": 0, "ask_usd_top10": 0},
+        "flow": {
+            "buy_usd": 0, "sell_usd": 0, "flow": 0.0, "whale_count": 0,
+            "whale_buy_usd": 0, "whale_sell_usd": 0, "whale_net_usd": 0,
+            "whales": [], "min_whale_usd": WHALE_USD,
+        },
+        "kalshi_btc15m": kalshi,
+        "agents": {
+            "spotter": 0, "prior": 0, "book": 0, "flow": 0, "whale": 0,
+            "edge": 0, "kelly_confidence": 1, "taker": "WAIT", "closer": "HOLD",
+        },
+        "signal": "WAIT",
+        "side": "WAIT",
+        "confidence": 1.0,
+        "levels": {"long_tp": price, "long_sl": price, "short_tp": price, "short_sl": price},
+        "notes": {
+            "whales": "Fallback mode — Binance blocked/hung from host",
+            "kalshi": "Public KXBTC15M odds; terminal does not place orders",
+            "ui": "Desk-style layout; no fake swarm PnL",
+        },
+        "timeline": timeline_phase((kalshi or {}).get("seconds_remaining") if isinstance(kalshi, dict) else rem15),
+        "probability": 1.0,
+        "next_15m": "WAIT",
+        "whale_flow_usd": 0,
+        "swarm": {"agents_live": 6, "mode": "SIGNALS ONLY · FALLBACK", "human": "YOU decide entries — no auto orders"},
+        "decision_aid": decision_aid,
+        "open_session": open_session,
+        "fallback": True,
+        "fallback_error": err,
+    }
+
+
 def analyze():
     ks = fetch_klines(120)
     price = fetch_price()
@@ -588,19 +656,24 @@ def analyze():
 
 
 def loop():
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
     # Show something immediately so the UI is not stuck on CARGANDO forever.
     with lock:
         if STATE["data"] is None and STATE["error"] is None:
             STATE["error"] = "warming up…"
     while True:
         try:
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-            with ThreadPoolExecutor(max_workers=1) as ex:
+            # wait=False on shutdown or a hung Binance call blocks forever in `with`.
+            ex = ThreadPoolExecutor(max_workers=1)
+            try:
                 fut = ex.submit(analyze)
                 try:
-                    d = fut.result(timeout=25)
+                    d = fut.result(timeout=20)
                 except FuturesTimeout:
-                    raise TimeoutError("analyze exceeded 25s (upstream hang)")
+                    fut.cancel()
+                    raise TimeoutError("analyze exceeded 20s (Binance/Kalshi hang)")
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
             da = d.get("decision_aid") or {}
             light_tag = "🟢" if da.get("light") == "green" else "🔴"
             line = (
@@ -620,8 +693,21 @@ def loop():
                 d["activity"] = list(reversed(ACTIVITY[-12:]))
                 STATE["data"] = d
         except Exception as e:
-            with lock:
-                STATE["error"] = str(e)
+            try:
+                d = analyze_fallback(str(e))
+                da = d.get("decision_aid") or {}
+                line = f"FALLBACK price={d['price']} ({e})"
+                with lock:
+                    STATE["data"] = d
+                    STATE["error"] = None
+                    STATE["updated"] = time.time()
+                    ACTIVITY.append({"ts": d["timestamp"], "line": line})
+                    del ACTIVITY[:-40]
+                    d["activity"] = list(reversed(ACTIVITY[-12:]))
+                    STATE["data"] = d
+            except Exception as e2:
+                with lock:
+                    STATE["error"] = f"{e} | fallback: {e2}"
         time.sleep(5)
 
 
