@@ -1,5 +1,6 @@
 import os, time, threading, math
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template
 import requests
 
@@ -16,6 +17,121 @@ lock = threading.Lock()
 STATE = {"data": None, "error": None, "updated": None}
 ACTIVITY = []  # recent real events for desk log
 
+
+
+
+
+def _et_now():
+    try:
+        return datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        return datetime.now(timezone.utc) - timedelta(hours=4)
+
+
+def open_risk_active(now=None):
+    """True only for [09:15, 10:00) America/New_York."""
+    now = now or _et_now()
+    mins = now.hour * 60 + now.minute
+    return (9 * 60 + 15) <= mins < (10 * 60)
+
+
+def fetch_es_open_wick():
+    """ES/SPY open wick around cash open. Honest N/A when no data."""
+    now = _et_now()
+    out = {
+        "open_risk": open_risk_active(now),
+        "es_label": "N/A",
+        "es_detail": "Fuera de ventana 9:15–10:00 ET",
+        "time_et": now.strftime("%H:%M ET"),
+        "symbol": None,
+    }
+    if not out["open_risk"]:
+        return out
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; omega-desk/1.0)"}
+    for sym in ("ES=F", "SPY"):
+        try:
+            r = requests.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                params={"interval": "1m", "range": "1d"},
+                headers=headers,
+                timeout=6,
+            )
+            if r.status_code != 200:
+                continue
+            res = ((r.json().get("chart") or {}).get("result") or [None])[0]
+            if not res:
+                continue
+            ts = res.get("timestamp") or []
+            q = ((res.get("indicators") or {}).get("quote") or [None])[0] or {}
+            opens, highs, lows, closes = q.get("open"), q.get("high"), q.get("low"), q.get("close")
+            if not ts or not opens:
+                continue
+
+            bars = []
+            for i, t in enumerate(ts):
+                try:
+                    dt = datetime.fromtimestamp(t, tz=ZoneInfo("America/New_York"))
+                except Exception:
+                    dt = datetime.fromtimestamp(t, tz=timezone.utc) - timedelta(hours=4)
+                if dt.hour != 9 or not (25 <= dt.minute <= 45):
+                    continue
+                o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+                if None in (o, h, l, c):
+                    continue
+                bars.append({"dt": dt, "o": float(o), "h": float(h), "l": float(l), "c": float(c)})
+
+            if not bars:
+                if now.hour == 9 and now.minute < 30:
+                    out.update(es_label="WAITING", es_detail="Esperando open 9:30 ET", symbol=sym)
+                    return out
+                continue
+
+            open_bars = [b for b in bars if b["dt"].minute >= 30]
+            pre_bars = [b for b in bars if b["dt"].minute < 30]
+            if not open_bars:
+                out.update(es_label="WAITING", es_detail="Sin barra >=9:30 aun", symbol=sym)
+                return out
+
+            first = open_bars[0]
+            rng = (first["h"] - first["l"]) or 1e-9
+            lower = min(first["o"], first["c"]) - first["l"]
+            rebound = False
+            if pre_bars:
+                pre_low = min(b["l"] for b in pre_bars)
+                if first["l"] <= pre_low * 1.001 and (first["c"] - first["l"]) / rng > 0.55:
+                    rebound = True
+            body_up = first["c"] > first["o"]
+            wick_up = rebound or (body_up and lower / rng > 0.35 and (first["c"] - first["l"]) / rng > 0.5)
+            last_c = open_bars[-1]["c"]
+            upper = first["h"] - max(first["o"], first["c"])
+            trend_down = ((first["c"] < first["o"] and upper / rng < 0.25)
+                          or (last_c < first["o"] * 0.999 and not wick_up))
+
+            if wick_up:
+                out.update(
+                    es_label="WICK_UP",
+                    es_detail=f"{sym}: rebote/wick alcista en open — cuidado chase UP",
+                    symbol=sym,
+                )
+            elif trend_down:
+                out.update(
+                    es_label="TREND_DOWN",
+                    es_detail=f"{sym}: continuacion bajista sin wick alcista fuerte",
+                    symbol=sym,
+                )
+            else:
+                out.update(
+                    es_label="MIXED",
+                    es_detail=f"{sym}: open mixto — sin sesgo claro",
+                    symbol=sym,
+                )
+            return out
+        except Exception:
+            continue
+
+    out.update(es_label="N/A", es_detail="Sin data ES/SPY (Yahoo)")
+    return out
 
 
 def _binance_get(path, params):
@@ -325,7 +441,9 @@ def analyze():
         kalshi["hint"] = kalshi_hint
 
     # Decision aid: Kalshi cheap vs expensive + green/red semaphore
+    open_session = fetch_es_open_wick()
     EDGE_MIN = 3.0
+    EDGE_OPEN = 6.0  # tighter during OPEN RISK window
 
     def _norm_ask(x):
         if x is None:
@@ -375,12 +493,18 @@ def analyze():
                 label = "CARO"
             else:
                 label = "JUSTO"
-            operate = edge_cents >= EDGE_MIN
+            edge_need = EDGE_OPEN if open_session.get("open_risk") else EDGE_MIN
+            operate = edge_cents >= edge_need
             light = "green" if operate else "red"
             line = (
                 f"{side_da} ~{fair_cents:.0f}¢ justo, Kalshi {kalshi_ask_cents:.0f}¢ "
                 f"→ {label} ({edge_cents:+.0f}¢)"
             )
+            if open_session.get("open_risk"):
+                tip = f"OPEN RISK — WAIT o solo si muy BARATO (≥{EDGE_OPEN:.0f}¢)"
+                if open_session.get("es_label") == "WICK_UP" and side_da == "UP":
+                    tip += " · WICK_UP: no chase UP"
+                line = f"{line} · {tip}"
             decision_aid = {
                 "side": side_da,
                 "fair_cents": round(fair_cents, 1),
@@ -457,6 +581,7 @@ def analyze():
             "human": "YOU decide entries — no auto orders",
         },
         "decision_aid": decision_aid,
+        "open_session": open_session,
     }
 
 
@@ -514,3 +639,6 @@ def _ensure_loop():
 if __name__ == "__main__":
     _start_loop_once()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
+
+#_eager_start for gunicorn workers
+_start_loop_once()
