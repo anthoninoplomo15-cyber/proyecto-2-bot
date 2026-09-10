@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="es">
 <head>
@@ -14,6 +15,7 @@
       <div class="pill on" id="swarm">SWARM ONLINE · 6 AGENTS</div>
       <div class="pill" id="mode">SIGNALS ONLY</div>
       <div class="pill" id="status">● LIVE</div>
+      <div class="pill open-risk" id="openRisk" style="display:none">OPEN RISK</div>
       <div class="pill" id="clock">—</div>
     </div>
   </div>
@@ -44,6 +46,7 @@
       <div class="sub" id="reason">—</div>
       <div id="light" class="light-pill light-red">🔴 CARO</div>
       <div class="sub edge-line" id="edgeLine">—</div>
+      <div class="sub open-wick" id="openWick"></div>
       <div class="sub" id="lightHint" style="margin-top:4px;font-size:11px;color:#8b949e">Luz = precio Kalshi. Arriba = entrar o no.</div>
       <div class="phases" id="phases">
         <div class="phase" data-p="0">0–3 DATA</div>
@@ -153,6 +156,18 @@ async function refresh(){
     lightEl.textContent=go?"🟢 BARATO":"🔴 CARO";
   }
   set("edgeLine", da.line||"—");
+  const os=d.open_session||{};
+  const orEl=document.getElementById("openRisk");
+  if(orEl){
+    orEl.style.display=os.open_risk?"inline-block":"none";
+    orEl.className="pill open-risk"+(os.open_risk?" on":"");
+  }
+  if(os.open_risk){
+    set("openWick", (os.es_label||"—")+" · "+(os.es_detail||"")+" · "+(os.time_et||""));
+  }else{
+    set("openWick", "");
+  }
+
   if(da.edge_cents!=null && da.label){
     set("kedge", "EDGE "+Number(da.edge_cents).toFixed(1)+"¢ · "+da.label+(da.side?" · "+da.side:""));
   }else{
