@@ -136,9 +136,10 @@ def fetch_es_open_wick():
 
 def _binance_get(path, params):
     last = None
+    # Short connect/read timeouts so Render never hangs forever on a dead peer.
     for host in BINANCE_HOSTS:
         try:
-            r = requests.get(host + path, params=params, timeout=5)
+            r = requests.get(host + path, params=params, timeout=(2.0, 4.0))
             if r.status_code == 451:
                 last = Exception(f"{host} blocked (451)")
                 continue
@@ -146,6 +147,7 @@ def _binance_get(path, params):
             return r.json()
         except Exception as e:
             last = e
+            continue
     raise last if last else RuntimeError("binance unreachable")
 
 
@@ -172,7 +174,7 @@ def fetch_kalshi_btc15m():
     r = requests.get(
         KALSHI_MARKETS,
         params={"series_ticker": "KXBTC15M", "status": "open", "limit": 20},
-        timeout=6,
+        timeout=(2.0, 4.0),
     )
     r.raise_for_status()
     markets = r.json().get("markets") or []
@@ -586,9 +588,19 @@ def analyze():
 
 
 def loop():
+    # Show something immediately so the UI is not stuck on CARGANDO forever.
+    with lock:
+        if STATE["data"] is None and STATE["error"] is None:
+            STATE["error"] = "warming up…"
     while True:
         try:
-            d = analyze()
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(analyze)
+                try:
+                    d = fut.result(timeout=25)
+                except FuturesTimeout:
+                    raise TimeoutError("analyze exceeded 25s (upstream hang)")
             da = d.get("decision_aid") or {}
             light_tag = "🟢" if da.get("light") == "green" else "🔴"
             line = (
