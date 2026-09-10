@@ -135,40 +135,155 @@ def fetch_es_open_wick():
     return out
 
 
-def _binance_get(path, params):
-    last = None
-    # Short connect/read timeouts so Render never hangs forever on a dead peer.
-    for host in BINANCE_HOSTS:
-        try:
-            r = requests.get(host + path, params=params, timeout=(2.0, 4.0))
-            if r.status_code == 451:
-                last = Exception(f"{host} blocked (451)")
-                continue
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last = e
-            continue
-    raise last if last else RuntimeError("binance unreachable")
+# Market data: OKX first (works on cloud hosts), then Binance.US. Never hang.
+_HTTP_TIMEOUT = (1.2, 2.5)
+_FEED = {"name": None}
+
+
+def _http_get(url, params=None):
+    r = requests.get(
+        url,
+        params=params or {},
+        timeout=_HTTP_TIMEOUT,
+        headers={"User-Agent": "omega-desk/1.2", "Accept": "application/json"},
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _okx_klines(limit=120):
+    j = _http_get(
+        "https://www.okx.com/api/v5/market/candles",
+        {"instId": "BTC-USDT", "bar": "1m", "limit": str(limit)},
+    )
+    rows = j.get("data") or []
+    # OKX: newest first → oldest first; normalize to Binance-like kline rows
+    out = []
+    for row in reversed(rows):
+        # [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+        out.append([int(row[0]), row[1], row[2], row[3], row[4], row[5]])
+    if not out:
+        raise RuntimeError("okx empty klines")
+    return out
+
+
+def _okx_price():
+    j = _http_get(
+        "https://www.okx.com/api/v5/market/ticker",
+        {"instId": "BTC-USDT"},
+    )
+    return float(j["data"][0]["last"])
+
+
+def _okx_depth(limit=20):
+    j = _http_get(
+        "https://www.okx.com/api/v5/market/books",
+        {"instId": "BTC-USDT", "sz": str(limit)},
+    )
+    book = (j.get("data") or [{}])[0]
+    bids = [[b[0], b[1]] for b in (book.get("bids") or [])[:limit]]
+    asks = [[a[0], a[1]] for a in (book.get("asks") or [])[:limit]]
+    return {"bids": bids, "asks": asks}
+
+
+def _okx_trades(limit=500):
+    j = _http_get(
+        "https://www.okx.com/api/v5/market/trades",
+        {"instId": "BTC-USDT", "limit": str(min(limit, 500))},
+    )
+    trades = []
+    for t in j.get("data") or []:
+        # side = taker side; buy taker ⇒ not buyer-maker
+        side = (t.get("side") or "").lower()
+        trades.append(
+            {
+                "price": t.get("px"),
+                "qty": t.get("sz"),
+                "isBuyerMaker": side == "sell",
+                "time": int(t.get("ts") or 0),
+            }
+        )
+    return trades
+
+
+def _binance_us_get(path, params):
+    r = requests.get(
+        "https://api.binance.us" + path,
+        params=params,
+        timeout=_HTTP_TIMEOUT,
+        headers={"User-Agent": "omega-desk/1.2"},
+    )
+    if r.status_code == 451:
+        raise RuntimeError("binance.us blocked 451")
+    r.raise_for_status()
+    return r.json()
 
 
 def fetch_klines(limit=120):
-    return _binance_get(
-        "/api/v3/klines",
-        {"symbol": "BTCUSDT", "interval": "1m", "limit": limit},
-    )
+    errors = []
+    for name, fn in (
+        ("okx", lambda: _okx_klines(limit)),
+        ("binance.us", lambda: _binance_us_get(
+            "/api/v3/klines",
+            {"symbol": "BTCUSDT", "interval": "1m", "limit": limit},
+        )),
+    ):
+        try:
+            rows = fn()
+            _FEED["name"] = name
+            return rows
+        except Exception as e:
+            errors.append(f"{name}:{e}")
+    raise RuntimeError("klines failed: " + " | ".join(errors))
 
 
 def fetch_price():
-    return float(_binance_get("/api/v3/ticker/price", {"symbol": "BTCUSDT"})["price"])
+    errors = []
+    for name, fn in (
+        ("okx", _okx_price),
+        ("binance.us", lambda: float(
+            _binance_us_get("/api/v3/ticker/price", {"symbol": "BTCUSDT"})["price"]
+        )),
+        ("coinbase", fetch_coinbase_btc),
+    ):
+        try:
+            px = fn()
+            if _FEED["name"] is None:
+                _FEED["name"] = name
+            return px
+        except Exception as e:
+            errors.append(f"{name}:{e}")
+    raise RuntimeError("price failed: " + " | ".join(errors))
 
 
 def fetch_depth(limit=20):
-    return _binance_get("/api/v3/depth", {"symbol": "BTCUSDT", "limit": limit})
+    errors = []
+    for name, fn in (
+        ("okx", lambda: _okx_depth(limit)),
+        ("binance.us", lambda: _binance_us_get(
+            "/api/v3/depth", {"symbol": "BTCUSDT", "limit": limit}
+        )),
+    ):
+        try:
+            return fn()
+        except Exception as e:
+            errors.append(f"{name}:{e}")
+    raise RuntimeError("depth failed: " + " | ".join(errors))
 
 
 def fetch_trades(limit=500):
-    return _binance_get("/api/v3/trades", {"symbol": "BTCUSDT", "limit": limit})
+    errors = []
+    for name, fn in (
+        ("okx", lambda: _okx_trades(limit)),
+        ("binance.us", lambda: _binance_us_get(
+            "/api/v3/trades", {"symbol": "BTCUSDT", "limit": limit}
+        )),
+    ):
+        try:
+            return fn()
+        except Exception as e:
+            errors.append(f"{name}:{e}")
+    raise RuntimeError("trades failed: " + " | ".join(errors))
 
 
 def fetch_kalshi_btc15m():
@@ -413,10 +528,12 @@ def analyze_fallback(err: str):
         "open_session": open_session,
         "fallback": True,
         "fallback_error": err,
+        "feed": "coinbase-fallback",
     }
 
 
 def analyze():
+    _FEED["name"] = None
     ks = fetch_klines(120)
     price = fetch_price()
     depth = fetch_depth(20)
@@ -653,6 +770,7 @@ def analyze():
         },
         "decision_aid": decision_aid,
         "open_session": open_session,
+        "feed": _FEED.get("name"),
     }
 
 
@@ -703,17 +821,22 @@ def data():
     _start_loop_once()
     with lock:
         d, err = STATE["data"], STATE["error"]
-    # Sync rescue: if background loop is wedged, still paint something.
-    if d is None:
+        updated = STATE.get("updated") or 0
+    # Sync rescue / upgrade: if empty OR stuck in fallback >15s, try full analyze once.
+    need = d is None or (d.get("fallback") and (time.time() - updated) > 15)
+    if need:
         try:
-            d = analyze_fallback("api-sync")
+            try:
+                d2 = analyze()
+            except Exception as e:
+                d2 = analyze_fallback(str(e))
             with lock:
-                if STATE["data"] is None:
-                    STATE["data"] = d
-                    STATE["error"] = None
-                    STATE["updated"] = time.time()
-                    d["activity"] = [{"ts": d["timestamp"], "line": "api-sync fallback"}]
-                    STATE["data"] = d
+                STATE["data"] = d2
+                STATE["error"] = None
+                STATE["updated"] = time.time()
+                if not d2.get("activity"):
+                    d2["activity"] = [{"ts": d2["timestamp"], "line": f"sync feed={d2.get('feed')}"}]
+                    STATE["data"] = d2
                 d, err = STATE["data"], STATE["error"]
         except Exception as e:
             err = err or str(e)
