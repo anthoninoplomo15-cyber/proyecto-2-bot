@@ -881,8 +881,13 @@ def data():
     with lock:
         d, err = STATE["data"], STATE["error"]
         updated = STATE.get("updated") or 0
-    # Sync rescue / upgrade: if empty OR stuck in fallback >15s, try full analyze once.
-    need = d is None or (d.get("fallback") and (time.time() - updated) > 15)
+    age = time.time() - float(updated or 0)
+    # Refresh if empty, fallback, OR stale (loop wedged — was freezing WINDOW at 10:43).
+    need = (
+        d is None
+        or age > 20
+        or (isinstance(d, dict) and d.get("fallback") and age > 10)
+    )
     if need:
         try:
             try:
@@ -894,7 +899,7 @@ def data():
                 STATE["error"] = None
                 STATE["updated"] = time.time()
                 if not d2.get("activity"):
-                    d2["activity"] = [{"ts": d2["timestamp"], "line": f"sync feed={d2.get('feed')}"}]
+                    d2["activity"] = [{"ts": d2["timestamp"], "line": f"sync feed={d2.get('feed')} age={age:.0f}s"}]
                     STATE["data"] = d2
                 d, err = STATE["data"], STATE["error"]
         except Exception as e:
