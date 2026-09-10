@@ -286,6 +286,54 @@ def fetch_trades(limit=500):
     raise RuntimeError("trades failed: " + " | ".join(errors))
 
 
+
+def kalshi_fee_cents_per_contract(p):
+    """Kalshi-style fee ≈ 0.07 * P * (1-P) dollars → cents per contract."""
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return 0.0
+    p = max(0.01, min(0.99, p))
+    return 7.0 * p * (1.0 - p)
+
+
+def fetch_kalshi_book_near_ask(ticker, favor_yes, ask_prob, band=0.03, min_contracts=25.0):
+    """Liquidity near the ask for the favored side. YES buys lift NO bids (and vice versa)."""
+    out = {
+        "book_ok": False,
+        "book_contracts_near": None,
+        "book_label": "BOOK ?",
+    }
+    if not ticker or ask_prob is None:
+        return out
+    try:
+        r = requests.get(
+            f"https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}/orderbook",
+            timeout=(1.2, 2.5),
+            headers={"User-Agent": "omega-desk/1.3", "Accept": "application/json"},
+        )
+        r.raise_for_status()
+        ob = (r.json() or {}).get("orderbook_fp") or {}
+        levels = ob.get("no_dollars" if favor_yes else "yes_dollars") or []
+        target = 1.0 - float(ask_prob)
+        near = 0.0
+        for row in levels:
+            if not row or len(row) < 2:
+                continue
+            px, sz = float(row[0]), float(row[1])
+            if abs(px - target) <= band:
+                near += sz
+        out["book_contracts_near"] = round(near, 0)
+        ok = near >= min_contracts
+        out["book_ok"] = ok
+        out["book_label"] = "BOOK OK" if ok else "BOOK THIN"
+        return out
+    except Exception as e:
+        out["book_label"] = "BOOK ?"
+        out["book_error"] = str(e)[:80]
+        return out
+
+
 def fetch_kalshi_btc15m():
     r = requests.get(
         KALSHI_MARKETS,
@@ -675,6 +723,8 @@ def analyze():
         else:
             kalshi_ask_cents = ask_prob * 100
             edge_cents = fair_cents - kalshi_ask_cents
+            fee_cents = kalshi_fee_cents_per_contract(ask_prob)
+            edge_net_cents = edge_cents - fee_cents
             if edge_cents >= 0.5:
                 label = "BARATO"
             elif edge_cents <= -0.5:
@@ -682,14 +732,18 @@ def analyze():
             else:
                 label = "JUSTO"
             edge_need = EDGE_OPEN if open_session.get("open_risk") else EDGE_MIN
-            operate = edge_cents >= edge_need
+            book = fetch_kalshi_book_near_ask(
+                kalshi.get("ticker"), favor_yes, ask_prob
+            )
+            # Green only if NET edge clears threshold AND book not thin
+            operate = (edge_net_cents >= edge_need) and bool(book.get("book_ok"))
             light = "green" if operate else "red"
             line = (
-                f"{side_da} ~{fair_cents:.0f}¢ justo, Kalshi {kalshi_ask_cents:.0f}¢ "
-                f"→ {label} ({edge_cents:+.0f}¢)"
+                f"{side_da} bruto {edge_cents:+.1f}¢ − fee {fee_cents:.1f}¢ "
+                f"= neto {edge_net_cents:+.1f}¢ · {label} · {book.get('book_label')}"
             )
             if open_session.get("open_risk"):
-                tip = f"OPEN RISK — WAIT o solo si muy BARATO (≥{EDGE_OPEN:.0f}¢)"
+                tip = f"OPEN RISK (≥{EDGE_OPEN:.0f}¢ neto)"
                 if open_session.get("es_label") == "WICK_UP" and side_da == "UP":
                     tip += " · WICK_UP: no chase UP"
                 line = f"{line} · {tip}"
@@ -698,6 +752,11 @@ def analyze():
                 "fair_cents": round(fair_cents, 1),
                 "kalshi_ask_cents": round(kalshi_ask_cents, 1),
                 "edge_cents": round(edge_cents, 1),
+                "fee_cents": round(fee_cents, 2),
+                "edge_net_cents": round(edge_net_cents, 1),
+                "book_ok": book.get("book_ok"),
+                "book_label": book.get("book_label"),
+                "book_contracts_near": book.get("book_contracts_near"),
                 "label": label,
                 "operate": operate,
                 "light": light,
