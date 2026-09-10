@@ -8,6 +8,7 @@ app = Flask(__name__)
 
 BINANCE_HOSTS = (
     "https://api.binance.us",
+    # .com often 451 from cloud hosts; keep as last resort only
     "https://api.binance.com",
 )
 KALSHI_MARKETS = "https://api.elections.kalshi.com/trade-api/v2/markets"
@@ -656,24 +657,16 @@ def analyze():
 
 
 def loop():
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-    # Show something immediately so the UI is not stuck on CARGANDO forever.
+    """Background refresh. Never leave the UI on blank forever."""
     with lock:
-        if STATE["data"] is None and STATE["error"] is None:
+        if STATE["data"] is None and not STATE["error"]:
             STATE["error"] = "warming up…"
     while True:
         try:
-            # wait=False on shutdown or a hung Binance call blocks forever in `with`.
-            ex = ThreadPoolExecutor(max_workers=1)
             try:
-                fut = ex.submit(analyze)
-                try:
-                    d = fut.result(timeout=20)
-                except FuturesTimeout:
-                    fut.cancel()
-                    raise TimeoutError("analyze exceeded 20s (Binance/Kalshi hang)")
-            finally:
-                ex.shutdown(wait=False, cancel_futures=True)
+                d = analyze()
+            except Exception as e:
+                d = analyze_fallback(str(e))
             da = d.get("decision_aid") or {}
             light_tag = "🟢" if da.get("light") == "green" else "🔴"
             line = (
@@ -684,6 +677,8 @@ def loop():
                 f"{light_tag} {da.get('label') or '—'} "
                 f"edge={da.get('edge_cents')}"
             )
+            if d.get("fallback"):
+                line = f"FALLBACK {line}"
             with lock:
                 STATE["data"] = d
                 STATE["error"] = None
@@ -693,21 +688,8 @@ def loop():
                 d["activity"] = list(reversed(ACTIVITY[-12:]))
                 STATE["data"] = d
         except Exception as e:
-            try:
-                d = analyze_fallback(str(e))
-                da = d.get("decision_aid") or {}
-                line = f"FALLBACK price={d['price']} ({e})"
-                with lock:
-                    STATE["data"] = d
-                    STATE["error"] = None
-                    STATE["updated"] = time.time()
-                    ACTIVITY.append({"ts": d["timestamp"], "line": line})
-                    del ACTIVITY[:-40]
-                    d["activity"] = list(reversed(ACTIVITY[-12:]))
-                    STATE["data"] = d
-            except Exception as e2:
-                with lock:
-                    STATE["error"] = f"{e} | fallback: {e2}"
+            with lock:
+                STATE["error"] = str(e)
         time.sleep(5)
 
 
@@ -718,8 +700,24 @@ def index():
 
 @app.route("/api/data")
 def data():
+    _start_loop_once()
     with lock:
-        return jsonify({"data": STATE["data"], "error": STATE["error"]})
+        d, err = STATE["data"], STATE["error"]
+    # Sync rescue: if background loop is wedged, still paint something.
+    if d is None:
+        try:
+            d = analyze_fallback("api-sync")
+            with lock:
+                if STATE["data"] is None:
+                    STATE["data"] = d
+                    STATE["error"] = None
+                    STATE["updated"] = time.time()
+                    d["activity"] = [{"ts": d["timestamp"], "line": "api-sync fallback"}]
+                    STATE["data"] = d
+                d, err = STATE["data"], STATE["error"]
+        except Exception as e:
+            err = err or str(e)
+    return jsonify({"data": d, "error": err})
 
 
 def _start_loop_once():
