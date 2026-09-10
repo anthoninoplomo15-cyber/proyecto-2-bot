@@ -571,12 +571,47 @@ def analyze_fallback(err: str):
         "probability": 1.0,
         "next_15m": "WAIT",
         "whale_flow_usd": 0,
-        "swarm": {"agents_live": 6, "mode": "SIGNALS ONLY · FALLBACK", "human": "YOU decide entries — no auto orders"},
+        "swarm": {"agents_live": 7, "mode": "SIGNALS ONLY · FALLBACK", "human": "YOU decide entries — no auto orders"},
         "decision_aid": decision_aid,
         "open_session": open_session,
         "fallback": True,
         "fallback_error": err,
         "feed": "coinbase-fallback",
+    }
+
+
+
+def compute_regime(closes, atr14, lookback=30):
+    """TREND vs CHOP from path efficiency (no extra API)."""
+    if not closes or len(closes) < 8:
+        return {"label": "MIXED", "score": 0.0, "er": 0.0, "tip": "Pocos datos"}
+    n = min(lookback, len(closes))
+    c = closes[-n:]
+    net = abs(c[-1] - c[0])
+    path = sum(abs(c[i] - c[i - 1]) for i in range(1, len(c))) or 1e-9
+    er = net / path
+    band = max(c) - min(c)
+    a = float(atr14 or 0)
+    # CHOP: little net progress vs path, or tiny band vs ATR
+    if er <= 0.22 or (a > 0 and band < 4.0 * a):
+        return {
+            "label": "CHOP",
+            "score": round(-min(1.0, max(0.2, (0.35 - er) * 2.5)), 3),
+            "er": round(er, 3),
+            "tip": "Rango/vaivén — no forzar entradas",
+        }
+    if er >= 0.32 and (a <= 0 or band >= 5.0 * a):
+        return {
+            "label": "TREND",
+            "score": round(min(1.0, er * 2), 3),
+            "er": round(er, 3),
+            "tip": "Dirección clara — setup tiene más sentido",
+        }
+    return {
+        "label": "MIXED",
+        "score": 0.0,
+        "er": round(er, 3),
+        "tip": "Ni trend limpio ni chop extremo",
     }
 
 
@@ -650,6 +685,11 @@ def analyze():
         signal, side = "ENTER SHORT", "DOWN"
     else:
         signal, side = "WAIT", "WAIT"
+
+    regime = compute_regime(closes, a)
+    if regime["label"] == "CHOP" and signal != "WAIT":
+        signal, side = "WAIT", "WAIT"
+        regime["tip"] = "CHOP: agentes anulados — NO ENTRAR"
 
     long_exit = e3 < e9 or price < vw or rr < 45
     short_exit = e3 > e9 or price > vw or rr > 55
@@ -736,7 +776,11 @@ def analyze():
                 kalshi.get("ticker"), favor_yes, ask_prob
             )
             # Green only if NET edge clears threshold AND book not thin
-            operate = (edge_net_cents >= edge_need) and bool(book.get("book_ok"))
+            operate = (
+                (edge_net_cents >= edge_need)
+                and bool(book.get("book_ok"))
+                and regime.get("label") != "CHOP"
+            )
             light = "green" if operate else "red"
             line = (
                 f"{side_da} bruto {edge_cents:+.1f}¢ − fee {fee_cents:.1f}¢ "
@@ -747,6 +791,8 @@ def analyze():
                 if open_session.get("es_label") == "WICK_UP" and side_da == "UP":
                     tip += " · WICK_UP: no chase UP"
                 line = f"{line} · {tip}"
+            if regime.get("label") == "CHOP":
+                line = f"{line} · REGIME CHOP"
             decision_aid = {
                 "side": side_da,
                 "fair_cents": round(fair_cents, 1),
@@ -803,6 +849,10 @@ def analyze():
             "kelly_confidence": round(confidence, 1),
             "taker": signal,
             "closer": exit_signal,
+            "regime": regime.get("label"),
+            "regime_score": regime.get("score"),
+            "regime_er": regime.get("er"),
+            "regime_tip": regime.get("tip"),
         },
         "signal": signal,
         "side": side,
@@ -823,7 +873,7 @@ def analyze():
         "next_15m": side if side in {"UP", "DOWN"} else "WAIT",
         "whale_flow_usd": flow.get("whale_net_usd"),
         "swarm": {
-            "agents_live": 6,
+            "agents_live": 7,
             "mode": "SIGNALS ONLY",
             "human": "YOU decide entries — no auto orders",
         },
