@@ -691,9 +691,17 @@ def analyze():
         signal, side = "WAIT", "WAIT"
         regime["tip"] = "CHOP: agentes anulados — NO ENTRAR"
 
-    long_exit = e3 < e9 or price < vw or rr < 45
-    short_exit = e3 > e9 or price > vw or rr > 55
-    exit_signal = "EXIT LONG" if long_exit else ("EXIT SHORT" if short_exit else "HOLD")
+    # CLOSER: need 2-of-3 so it is not stuck on EXIT LONG forever in chop.
+    long_votes = (1 if e3 < e9 else 0) + (1 if price < vw else 0) + (1 if rr < 45 else 0)
+    short_votes = (1 if e3 > e9 else 0) + (1 if price > vw else 0) + (1 if rr > 55 else 0)
+    if long_votes >= 2 and long_votes > short_votes:
+        exit_signal = "EXIT LONG"
+    elif short_votes >= 2 and short_votes > long_votes:
+        exit_signal = "EXIT SHORT"
+    elif long_votes >= 2 and short_votes >= 2:
+        exit_signal = "HOLD"  # conflicting — chop, don't nag one side
+    else:
+        exit_signal = "HOLD"
 
     if a:
         long_tp, long_sl = price + 1.2 * a, price - 0.8 * a
